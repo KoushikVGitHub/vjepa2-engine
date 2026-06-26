@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.mp4
+*.pth
+*.ckpt
+checkpoints/
+samples/
+analysis/*.png
+.ipynb_checkpoints/
