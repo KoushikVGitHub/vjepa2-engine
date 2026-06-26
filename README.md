@@ -40,3 +40,5 @@ python -m src.data.curation        # profile the curation loader on samples/
 
 ## Status
 Active engineering build. Not affiliated with Meta or AMI Labs. Repo demonstrates production-engineering skills for self-supervised video world models: large-scale data curation, distributed training, and inference optimization.
+
+— [github.com/KoushikVGitHub/vjepa2-engine](https://github.com/KoushikVGitHub/vjepa2-engine)
