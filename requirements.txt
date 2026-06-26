@@ -1,0 +1,12 @@
+torch>=2.3
+torchvision
+transformers>=4.44   # V-JEPA 2 via AutoModel/AutoVideoProcessor
+av                   # PyAV backend for torchvision.io.read_video
+numpy
+decord            # fast video decode (alt: torchvision.io)
+einops
+scikit-learn      # linear probes
+matplotlib        # failure-mode plots
+tqdm
+# V-JEPA 2: clone github.com/facebookresearch/vjepa2 and follow its install,
+# or pip install from its instructions; pin the commit you used here.
