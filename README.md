@@ -12,7 +12,7 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 |---|---|---|---|
 | **1 · Curation at scale** | `src/data/curation.py` | Decode → clip-sample → motion-filter → normalized batched loader. Manifest-driven offline curation; profiled `clips/sec` and found the bottleneck *moves* under parallelism. | ✅ built + profiled |
 | **2 · The method (from scratch)** | `src/jepa_loss.py`, `src/sigreg.py` | Minimal JEPA (masking, EMA target, stop-grad predictor) + SIGReg anti-collapse — so the training loop isn't a black box. Empirically reproduced *stop-gradient*, not EMA decay, as the load-bearing anti-collapse mechanism. | ✅ built + verified |
-| **3 · Distributed training** | `src/train_fsdp.py` | Wrap the JEPA loop in **PyTorch FSDP/DDP**, bf16 mixed precision, activation checkpointing. Real multi-GPU run, throughput logged before/after. | 🔜 Day 4 |
+| **3 · Distributed training** | `src/train_fsdp.py` | Wrap the JEPA loop in **PyTorch FSDP/DDP**, bf16 mixed precision, activation checkpointing. Real 2×A40 run, throughput + memory + MFU logged per lever ([`notes/day4_results.md`](notes/day4_results.md)). | ✅ built + benchmarked |
 | **4 · Inference optimization** | `src/infer.py` | Baseline encoder inference → `torch.compile`, bf16/fp16, batching, optional int8 PTQ. Latency (p50/p99) + throughput benchmark, lever-by-lever. | 🔜 Day 5 |
 
 **Why this scope:** it mirrors the three production-engineering competencies a self-supervised video lab needs — *curate → train at scale → serve fast* — built end to end rather than as disconnected demos.
@@ -35,7 +35,7 @@ python -m src.data.curation        # profile the curation loader on samples/
 ## Results (logged as built)
 - [x] **Curation pipeline (Stage 1):** decode→filter→loader on real video; rejection rate quantified; bottleneck characterized (decode-bound serial → plumbing-bound at 8 workers); threshold set from motion distribution tail.
 - [x] **Method reproduction (Stage 2):** from-scratch JEPA collapse study — stop-gradient (not EMA decay) is load-bearing; symmetric variant collapses (std→0, loss→0) as predicted.
-- [ ] **Distributed training (Stage 3):** FSDP/DDP throughput before→after, bf16 + activation checkpointing — `___ → ___ clips/sec`, scaling efficiency `___%`.
+- [x] **Distributed training (Stage 3):** 2×A40, 114.5M-param JEPA. DDP/fp32 baseline → FSDP+bf16 = **146 → 492 samples/sec (3.4×)**, MFU 7.7% → 25.7%; adding activation checkpointing cuts peak memory **12.1 → 1.6 GB (7.5×)** at ~20% throughput cost. bf16 is the throughput lever (engages tensor cores), checkpointing the memory lever; FSDP-vs-DDP is throughput-neutral at this scale. Full table + analysis: [`notes/day4_results.md`](notes/day4_results.md).
 - [ ] **Inference optimization (Stage 4):** latency p50/p99 + throughput per lever (`torch.compile`, bf16, batching, int8) — baseline `___` → optimized `___`.
 
 ## Status
