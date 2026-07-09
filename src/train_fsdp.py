@@ -313,40 +313,17 @@ def build_dataloader(args, world, rank):
         so that per-rank batches remain perfectly EQUAL, allowing the SIGReg loss to 
         safely rely on an exact global count of N = batch * world.
     """
-    # 1. Define the physical fields to load. 
-    # Positive fields -> log10. Signed vector fields -> asinh.
-    # (Note: min_std values should ideally be tuned via your analyze_fields script)
+    # analyze_all.py (all 13 fields) showed EVERY field is positive-definite -> uniform log10
+    # (Vgas/Vcdm raw-min = +5 => velocity MAGNITUDE, not signed; MgFe +0.013). No field has a
+    # degenerate/near-constant population (even p5 std is healthy), so min_std=0.05 is a defensive
+    # floor that only catches a pathological fully-empty map (Mstar/Z/ne have raw-min 0). B is
+    # dropped (IllustrisTNG-only + floor-dominated, p50 std 0.009). The 12 kept fields exist in
+    # BOTH suites -> reusable for the SIMBA held-out probe.
+    FIELDS = ["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"]
     field_configs = [
-        {
-            "npy_path": os.path.join(args.data_root, "Maps_Mgas_IllustrisTNG_LH_z=0.00.npy"),
-            "name": "Mgas", 
-            "transform": "log10", 
-            "min_std": 0.006
-        },
-        {
-            "npy_path": os.path.join(args.data_root, "Maps_Vgas_IllustrisTNG_LH_z=0.00.npy"),
-            "name": "Vgas", 
-            "transform": "asinh", 
-            "min_std": 0.015
-        },
-        {
-            "npy_path": os.path.join(args.data_root, "Maps_T_IllustrisTNG_LH_z=0.00.npy"),
-            "name": "T",
-            "transform": "log10", 
-            "min_std": 0.010
-        },
-        {
-            "npy_path": os.path.join(args.data_root, "Maps_Mcdm_IllustrisTNG_LH_z=0.00.npy"),
-            "name": "Mcdm", 
-            "transform": "log10", 
-            "min_std": 0.005
-        },
-        {
-            "npy_path": os.path.join(args.data_root, "Maps_Vcdm_IllustrisTNG_LH_z=0.00.npy"),
-            "name": "Vcdm", 
-            "transform": "asinh", 
-            "min_std": 0.015
-        }
+        {"npy_path": os.path.join(args.data_root, f"Maps_{f}_IllustrisTNG_LH_z=0.00.npy"),
+         "name": f, "transform": "log10", "min_std": 0.05}
+        for f in FIELDS
     ]
 
     # Keep only fields whose file is actually on the volume, so a partial download still runs
