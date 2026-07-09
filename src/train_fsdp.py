@@ -32,7 +32,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 
-from jepa_loss import JEPA, TinyEncoder, TinyPredictor, random_block_mask
+from jepa_loss import JEPA, ViTEncoder, ViTPredictor, random_block_mask
 from data.fields import FieldMapDataset
 
 
@@ -134,7 +134,7 @@ def build_model(args, device):
     Instantiates the raw, unsharded neural network components.
 
     Behavior:
-        Constructs the TinyEncoder, TinyPredictor, and JEPA wrapper based on the 
+        Constructs the ViTEncoder, ViTPredictor, and JEPA wrapper based on the 
         hyperparameters specified in `args`. Wraps them in `JEPAStep` and moves 
         them to the specified device.
         
@@ -143,10 +143,11 @@ def build_model(args, device):
         sharding strategies are applied.
     """
 
-    enc = TinyEncoder(img=args.img, patch=args.patch, d=args.d,
+    enc = ViTEncoder(img=args.img, patch=args.patch, d=args.d,
                       heads=args.heads, layers=args.layers)
     grid = args.img // args.patch
-    pred = TinyPredictor(grid * grid, d=args.d, heads=args.heads, layers=args.layers)
+    pred = ViTPredictor(grid * grid, d=args.d, pred_d=args.pred_d,
+                        heads=args.pred_heads, layers=args.pred_layers)
     jepa = JEPA(enc, pred, ema_decay=0.998, stop_grad=True,
                 loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda)
     return JEPAStep(jepa, grid, block=args.block).to(device)
@@ -170,7 +171,7 @@ def wrap_fsdp(model, args, device):
     
     auto_wrap = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls={nn.TransformerEncoderLayer, TinyEncoder, TinyPredictor},
+        transformer_layer_cls={nn.TransformerEncoderLayer, ViTEncoder, ViTPredictor},
     )
     mp = MixedPrecision(
         param_dtype=torch.bfloat16,
@@ -460,6 +461,9 @@ def parse_args():
     p.add_argument("--d", type=int, default=768)
     p.add_argument("--heads", type=int, default=12)
     p.add_argument("--layers", type=int, default=12)
+    p.add_argument("--pred-d", type=int, default=384, help="predictor width (lighter than d)")
+    p.add_argument("--pred-heads", type=int, default=6)
+    p.add_argument("--pred-layers", type=int, default=6)
     p.add_argument("--batch", type=int, default=64, help="per-GPU batch")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--peak-tflops", type=float, default=312.0,

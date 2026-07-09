@@ -80,7 +80,7 @@ def random_block_mask(grid: int, block: int, device):
 
 
 # --------------------------------------------------------------------------- tiny ViT pieces
-class TinyEncoder(nn.Module):
+class ViTEncoder(nn.Module):
     """
     A minimal Vision Transformer (ViT) encoder for patchified images.
 
@@ -119,37 +119,32 @@ class TinyEncoder(nn.Module):
         return self.blocks(tok)
 
 
-class TinyPredictor(nn.Module):
-    """
-    Predicts latent representations of masked target patches using context patches.
+class ViTPredictor(nn.Module):
+    """I-JEPA-style predictor: a LIGHTER transformer that predicts target latents from context.
 
-    Behavior:
-        Concatenates the encoded context tokens with learned placeholder "mask tokens". 
-        It adds the specific positional embeddings of the requested targets to these 
-        mask tokens ("predict what is located here"). The combined sequence is passed 
-        through transformer layers, and the outputs corresponding to the mask token 
-        slots are returned as the prediction.
-
-    Role in Program:
-        Forces the model to learn semantic world models by learning how to bridge 
-        the spatial gap between the context view and the masked target view.
+    Projects context tokens from the encoder dim (d) down to a narrower predictor dim (pred_d),
+    runs a few blocks, then projects back to d so the prediction matches the target latents
+    (which live in encoder-dim space). Keeping the predictor light is the I-JEPA default -- most
+    capacity should sit in the ENCODER, which is the part the probe actually uses.
     """
 
-    def __init__(self, n, d=64, heads=4, layers=2):
+    def __init__(self, n, d, pred_d=384, heads=6, layers=6):
         super().__init__()
-        self.mask_token = nn.Parameter(torch.randn(1, 1, d) * 0.02)
-        self.pos = nn.Parameter(torch.randn(n, d) * 0.02)
-        layer = nn.TransformerEncoderLayer(d, heads, d * 2, batch_first=True, dropout=0.0)
+        self.embed = nn.Linear(d, pred_d)                            # encoder dim -> predictor dim
+        self.mask_token = nn.Parameter(torch.randn(1, 1, pred_d) * 0.02)
+        self.pos = nn.Parameter(torch.randn(n, pred_d) * 0.02)
+        layer = nn.TransformerEncoderLayer(pred_d, heads, pred_d * 2, batch_first=True, dropout=0.0)
         self.blocks = nn.TransformerEncoder(layer, layers)
-        self.proj = nn.Linear(d, d)
+        self.proj = nn.Linear(pred_d, d)                             # predictor dim -> encoder dim
 
     def forward(self, ctx, ctx_idx, target_idx):
-        B, n_ctx, d = ctx.size(0), ctx.size(1), ctx.size(2)
-        ctx = ctx + self.pos[ctx_idx]                                # remind predictor where ctx is
-        masks = self.mask_token.expand(B, len(target_idx), d) + self.pos[target_idx]
+        B = ctx.size(0)
+        ctx = self.embed(ctx) + self.pos[ctx_idx]                    # (B, n_ctx, pred_d), + ctx pos
+        n_ctx = ctx.size(1)
+        masks = self.mask_token.expand(B, len(target_idx), -1) + self.pos[target_idx]
         x = torch.cat([ctx, masks], dim=1)
         x = self.blocks(x)
-        return self.proj(x[:, n_ctx:])                               # predictions at target slots
+        return self.proj(x[:, n_ctx:])                               # -> encoder dim, matches target
 
 
 class JEPA(nn.Module):
@@ -290,9 +285,9 @@ def train(decay=0.998, stop_grad=True, loss_mode="ema", sigreg_lambda=0.02,
     """
     
     torch.manual_seed(seed)
-    enc = TinyEncoder(img, patch, d)
+    enc = ViTEncoder(img, patch, d)
     grid = img // patch
-    pred = TinyPredictor(grid * grid, d)
+    pred = ViTPredictor(grid * grid, d=d, pred_d=d, heads=4, layers=2)
     model = JEPA(enc, pred, ema_decay=decay, stop_grad=stop_grad,
                  loss_mode=loss_mode, sigreg_lambda=sigreg_lambda).to(device)
     opt = torch.optim.Adam(

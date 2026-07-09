@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from jepa_loss import TinyEncoder
+from jepa_loss import ViTEncoder
 
 # CAMELS LH prior midpoints for (Omega_m, sigma_8), used to standardize the probe targets so
 # the two params are balanced in the loss. Shared by train_probe/eval_probe so the forward
@@ -37,7 +37,7 @@ def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
     Instantiates the ViT encoder and loads pretrained FSDP/DDP weights.
 
     Behavior:
-        Initializes the `TinyEncoder` configuration, extracts ONLY the context-encoder
+        Initializes the `ViTEncoder` configuration, extracts ONLY the context-encoder
         weights from the checkpoint (discarding predictor / target / wrapper prefixes),
         and loads them. Sets to eval mode and freezes all parameters. Refuses to proceed
         if any encoder parameter was not populated (guards a silently-random encoder).
@@ -46,13 +46,13 @@ def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
         Provides the fixed representation extractor. The JEPA encoder has finished
         learning; this function prepares it to embed data for the downstream probe.
     """
-    encoder = TinyEncoder(**enc_kw).to(device)
+    encoder = ViTEncoder(**enc_kw).to(device)
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)  # bundles an args dict
     # Accept either a bare state_dict or a {"model": state_dict, ...} training checkpoint.
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 
-    # Keep ONLY the context-encoder weights and remap them into TinyEncoder's key space by
+    # Keep ONLY the context-encoder weights and remap them into ViTEncoder's key space by
     # splitting on the "context_encoder." marker -- this discards ANY wrapper prefix in front
     # of it (module. / _fsdp_wrapped_module. / jepa. ...), which chained .replace() would miss.
     # (Save a gathered FULL_STATE_DICT from FSDP, not the per-rank sharded state.)
