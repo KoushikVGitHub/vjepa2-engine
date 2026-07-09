@@ -265,5 +265,5 @@ def build_loader(npy_path: str, batch_size: int = 64, num_workers: int = 8, **kw
 
 
 if __name__ == "__main__":
-    path = r"C:\Users\Koushik\vjepa2-probe\samples\Maps_Mgas_IllustrisTNG_LH_z=0.00.npy"
+    path = r"C:\Users\Koushik\vjepa2-probe\samples\Maps_B_IllustrisTNG_LH_z=0.00.npy"
     analyze_fields(path)
