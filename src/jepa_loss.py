@@ -245,6 +245,7 @@ class JEPA(nn.Module):
         # (optional) stash components for logging / collapse watch:
         self.last_pred = pred_loss.item()
         self.last_reg = reg.item()
+        self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()   # collapse detector
 
         # Return (loss, tgt) to match _forward_ema so train()'s collapse detector (tgt.std) works.
         return loss, tgt

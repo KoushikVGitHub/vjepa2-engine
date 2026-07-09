@@ -48,7 +48,7 @@ def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
     """
     encoder = TinyEncoder(**enc_kw).to(device)
 
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)  # bundles an args dict
     # Accept either a bare state_dict or a {"model": state_dict, ...} training checkpoint.
     state_dict = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
 

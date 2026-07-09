@@ -412,7 +412,12 @@ def main():
         opt.zero_grad(set_to_none=True)
         (model.module if hasattr(model, "module") else model).step_ema()
         if step % 20 == 0:
-            rprint(f"step {step:>4} loss {loss.item():.4f}")
+            core = model.module if hasattr(model, "module") else model
+            extra = ""
+            if args.loss == "lejepa":
+                j = core.jepa
+                extra = f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} tgt_std {j.last_tgt_std:.4f}"
+            rprint(f"step {step:>4} loss {loss.item():.4f}{extra}")
 
     torch.cuda.synchronize()
     elapsed = time.time() - t0
