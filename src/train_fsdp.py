@@ -19,6 +19,8 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     MixedPrecision,
     ShardingStrategy,
+    StateDictType,
+    FullStateDictConfig,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -218,6 +220,25 @@ def wrap_ddp(model, args):
             check_fn=lambda m: isinstance(m, nn.TransformerEncoderLayer),
         )
     return DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])])
+
+
+def save_checkpoint(model, args, path):
+    """Consolidate params to rank 0 and save a full (unsharded) state dict.
+
+    FSDP shards params across ranks, so we must gather a FULL_STATE_DICT (offloaded to CPU,
+    rank0-only) before saving -- a plain model.state_dict() under FSDP returns only this rank's
+    shard. Keys come out as the original hierarchy (jepa.context_encoder.*), which the probe's
+    load_frozen_encoder rebuilds by splitting on 'context_encoder.'.
+    """
+    if args.mode == "fsdp":
+        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            state = model.state_dict()
+    else:  # ddp: unwrap the replica
+        state = model.module.state_dict()
+    if is_main():
+        torch.save({"model": state, "args": vars(args)}, path)
+        rprint(f"[ckpt] saved -> {path}")
 
 
 def online_param_count(model):
@@ -432,6 +453,9 @@ def main():
     rprint(f" peak mem / gpu       : {peak_mem:8.2f} GB")
     rprint(f" MFU (approx)         : {mfu*100:8.2f} %")
     rprint("======================================================")
+
+    if args.save:
+        save_checkpoint(model, args, args.save)   # FSDP gathers to rank0 (barrier); all ranks call
     cleanup()
 
 
@@ -444,6 +468,8 @@ def parse_args():
                    help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--save", type=str, default="",
+                   help="path to save a gathered FULL_STATE_DICT checkpoint (empty = skip)")
     p.add_argument("--bf16", action="store_true")
     p.add_argument("--ckpt", action="store_true", help="activation checkpointing")
     p.add_argument("--img", type=int, default=256, help="CAMELS 2D maps are 256x256")
