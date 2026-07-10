@@ -320,7 +320,7 @@ def build_dataloader(args, world, rank):
     # floor that only catches a pathological fully-empty map (Mstar/Z/ne have raw-min 0). B is
     # dropped (IllustrisTNG-only + floor-dominated, p50 std 0.009). The 12 kept fields exist in
     # BOTH suites -> reusable for the SIMBA held-out probe.
-    FIELDS = ["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"]
+    FIELDS = args.fields
     field_configs = [
         {"npy_path": os.path.join(args.data_root, f"Maps_{f}_IllustrisTNG_LH_z=0.00.npy"),
          "name": f, "transform": "log10", "min_std": 0.05}
@@ -449,6 +449,10 @@ def parse_args():
     p.add_argument("--sigreg-lambda", type=float, default=0.02)
     p.add_argument("--data-root", type=str, default="/workspace/data",
                    help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy")
+    p.add_argument("--fields", type=lambda s: [f for f in s.split(",") if f],
+                   default=["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"],
+                   help="comma-separated CAMELS fields to pool; default = all 12 both-suite fields. "
+                        "Trim for fast iteration, e.g. --fields Mgas (missing files auto-skipped).")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--save", type=str, default="",
