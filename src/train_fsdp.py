@@ -7,6 +7,7 @@ the effect of FSDP, bf16 mixed precision, and activation checkpointing.
         --mode fsdp --bf16 --ckpt --steps 200 --peak-tflops 150
 """
 import os
+import math
 import time
 import argparse
 import functools
@@ -378,7 +379,17 @@ def main():
     model = build_model(args, device)
     n_online = online_param_count(model)
     model = wrap_fsdp(model, args, device) if args.mode == "fsdp" else wrap_ddp(model, args)
-    opt = torch.optim.AdamW(model.parameters(), lr=1.5e-4)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # LR schedule: linear warmup -> cosine decay to lr*lr_min_ratio. A flat LR with no warmup
+    # lets early updates slam the shared encoder into collapse before the representation forms;
+    # the cosine tail keeps late training from jittering back into the collapse basin.
+    def lr_at(step):
+        if step < args.warmup_steps:
+            return (step + 1) / max(1, args.warmup_steps)
+        prog = (step - args.warmup_steps) / max(1, args.steps - args.warmup_steps)
+        return args.lr_min_ratio + (1 - args.lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * prog))
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_at)
     use_autocast = args.bf16 and args.mode == "ddp"
 
     # Real CAMELS multifield data, sharded across ranks (replaces synthetic make_batch).
@@ -409,7 +420,13 @@ def main():
                          sigreg_generator=sigreg_gen if lejepa else None,
                          sigreg_distributed=lejepa)
         loss.backward()
+        if args.grad_clip > 0:                            # tame the grad spikes that tip it into collapse
+            if args.mode == "fsdp":
+                model.clip_grad_norm_(args.grad_clip)     # FSDP-aware: handles sharded grads correctly
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step()
+        sched.step()
         opt.zero_grad(set_to_none=True)
         (model.module if hasattr(model, "module") else model).step_ema()
         if step % args.log_every == 0 or step == args.steps - 1:
@@ -418,7 +435,7 @@ def main():
             if args.loss == "lejepa":
                 j = core.jepa
                 extra = f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} tgt_std {j.last_tgt_std:.4f}"
-            rprint(f"step {step:>4} loss {loss.item():.4f}{extra}")
+            rprint(f"step {step:>4} loss {loss.item():.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
     torch.cuda.synchronize()
     elapsed = time.time() - t0
@@ -471,6 +488,11 @@ def parse_args():
     p.add_argument("--batch", type=int, default=64, help="per-GPU batch")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--log-every", type=int, default=20, help="print step metrics every N steps")
+    p.add_argument("--lr", type=float, default=1.5e-4)
+    p.add_argument("--warmup-steps", type=int, default=20, help="linear LR warmup steps")
+    p.add_argument("--lr-min-ratio", type=float, default=0.1,
+                   help="cosine decay floor as a fraction of peak LR")
+    p.add_argument("--grad-clip", type=float, default=1.0, help="max grad norm (0 = off)")
     p.add_argument("--peak-tflops", type=float, default=312.0,
                    help="GPU bf16 dense peak: A100=312, H100=990, A40=150, 3090=71")
     return p.parse_args()
