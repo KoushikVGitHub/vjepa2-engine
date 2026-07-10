@@ -412,7 +412,7 @@ def main():
         opt.step()
         opt.zero_grad(set_to_none=True)
         (model.module if hasattr(model, "module") else model).step_ema()
-        if step % 20 == 0:
+        if step % args.log_every == 0 or step == args.steps - 1:
             core = model.module if hasattr(model, "module") else model
             extra = ""
             if args.loss == "lejepa":
@@ -470,6 +470,7 @@ def parse_args():
     p.add_argument("--pred-layers", type=int, default=6)
     p.add_argument("--batch", type=int, default=64, help="per-GPU batch")
     p.add_argument("--steps", type=int, default=200)
+    p.add_argument("--log-every", type=int, default=20, help="print step metrics every N steps")
     p.add_argument("--peak-tflops", type=float, default=312.0,
                    help="GPU bf16 dense peak: A100=312, H100=990, A40=150, 3090=71")
     return p.parse_args()
