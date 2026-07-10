@@ -20,6 +20,7 @@ is an (N, 256, 256) float32 array (N=15000 for the LH set). Values span orders o
 -> a log-transform is the field-specific curation decision (cf. motion-normalize for video).
 Docs: https://camels-multifield-dataset.readthedocs.io/en/latest/data.html
 """
+import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
@@ -30,19 +31,22 @@ EPS = 1e-6  # single log-floor constant, shared by _transform and analyze_fields
 class FieldMapDataset(Dataset):
     def __init__(self, npy_path: str, name: str = "field", transform: str = "log10",
                  manifest=None, min_std=None, size: int = 256,
-                 params_path: str = None, return_params: bool = False):
+                 params_path: str = None, return_params: bool = False,
+                 use_cache: bool = True):
         """
-        Initializes the dataset object, establishes the memory-mapped link to the physical file, 
-        and orchestrates the dataset's preparation phase. It automatically triggers the offline 
-        curation process (if no manifest is provided) and computes the global mean and standard 
+        Initializes the dataset object, establishes the memory-mapped link to the physical file,
+        and orchestrates the dataset's preparation phase. It automatically triggers the offline
+        curation process (if no manifest is provided) and computes the global mean and standard
         deviation required for normalizing the data before training.
         """
         # mmap so 3.9GB doesn't land in RAM; shape (N, 256, 256)
+        self.npy_path = npy_path
         self.maps = np.load(npy_path, mmap_mode="r")
         self.name = name                      # field name (e.g. "Mgas", "Vgas") - for stats/probe
         self.transform = transform            # "log10" | "asinh" | "none" (see _transform)
         self.size = size
         self.min_std = min_std
+        self.use_cache = use_cache            # cache the (manifest, mean, std) to disk, skip re-scan
 
         # Optional labels for the probe: (n_sims, 6) params, ONE ROW PER SIM.
         self.return_params = return_params
@@ -113,6 +117,66 @@ class FieldMapDataset(Dataset):
             return True
         return np.std(m) >= self.min_std
 
+    # --------------------------------------------------------------------- manifest cache (disk)
+    def _cache_path(self) -> str:
+        "Cache sits next to the .npy (on the persistent volume) so it survives pod restarts."
+        return self.npy_path + ".manifest.npz"
+
+    def _min_std_key(self) -> float:
+        "None is not npz-storable; encode 'no threshold' as -1.0 for the validity check."
+        return -1.0 if self.min_std is None else float(self.min_std)
+
+    def _load_cache(self) -> bool:
+        """Load a previously saved (manifest, mean, std) if present and still valid.
+
+        Invalidates automatically if the .npy is newer than the cache, or if the curation
+        config that produced it (transform / min_std / map count / map shape) no longer matches.
+        Returns True on a hit (self.manifest/mean/std populated), False otherwise.
+        """
+        if not self.use_cache:
+            return False
+        path = self._cache_path()
+        if not os.path.exists(path):
+            return False
+        if os.path.getmtime(path) < os.path.getmtime(self.npy_path):   # stale: data changed
+            return False
+        try:
+            z = np.load(path, allow_pickle=False)
+            H, W = self.maps.shape[1], self.maps.shape[2]
+            if (int(z["n_maps"]) != len(self.maps)
+                    or str(z["transform"]) != self.transform
+                    or float(z["min_std"]) != self._min_std_key()
+                    or int(z["H"]) != H or int(z["W"]) != W):
+                return False
+            self.manifest = z["manifest"].tolist()
+            self.mean = float(z["mean"])
+            self.std = float(z["std"])
+        except Exception:
+            return False   # any corruption -> fall back to a fresh scan
+        print(f"[{self.name}] loaded cached manifest ({len(self.manifest)} maps, "
+              f"mean={self.mean:.4f}, std={self.std:.4f}).")
+        return True
+
+    def _save_cache(self):
+        "Atomic write (tmp -> os.replace) so a concurrent rank never reads a half-written file."
+        if not self.use_cache:
+            return
+        H, W = self.maps.shape[1], self.maps.shape[2]
+        path = self._cache_path()
+        tmp = f"{path}.tmp.{os.getpid()}"
+        try:
+            np.savez(tmp, manifest=np.asarray(self.manifest, dtype=np.int64),
+                     mean=self.mean, std=self.std, n_maps=len(self.maps),
+                     transform=self.transform, min_std=self._min_std_key(), H=H, W=W)
+            os.replace(tmp, path)
+        except OSError:
+            # read-only volume or a lost write race -> skip caching, never crash training
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
     def _prepare(self, manifest):
         """Single offline pass over the field file: curate to build the manifest AND
         accumulate the standardization mean/std over the SURVIVING maps at the same time.
@@ -127,8 +191,10 @@ class FieldMapDataset(Dataset):
         H, W are read from the array shape, not the `size` arg -> a non-256^2 field can't
         silently corrupt the pixel count (and thus the stats).
         """
-        H, W = self.maps.shape[1], self.maps.shape[2]
         build = manifest is None
+        if build and self._load_cache():        # reruns: load in ms instead of re-scanning ~4GB
+            return
+        H, W = self.maps.shape[1], self.maps.shape[2]
         indices = range(len(self.maps)) if build else manifest
 
         kept = []
@@ -158,6 +224,7 @@ class FieldMapDataset(Dataset):
         if build:
             print(f"[{self.name}] curation: retained {len(kept)} / {len(self.maps)} maps "
                   f"(mean={self.mean:.4f}, std={self.std:.4f}).")
+            self._save_cache()               # persist so the next run skips this scan entirely
 
     # --------------------------------------------------------------------- torch Dataset API
     def __len__(self):
