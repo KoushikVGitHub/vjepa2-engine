@@ -1,29 +1,41 @@
-"""Day 2 BUILD - minimal JEPA from scratch: masking + tiny ViT + predictor + EMA target.
+"""JEPA Architecture: I-JEPA vs. LeJEPA and the Mechanics of Collapse.
 
-Goal of this file: rebuild the I-JEPA forward pass by hand so the mechanics are muscle,
-then EMPIRICALLY test WHAT prevents collapse. The first hypothesis ("low EMA decay ->
-collapse") was FALSIFIED by the run -- with the stop-gradient present, even decay=0 stays
-healthy. The corrected lesson (SimSiam, Chen & He 2020), reproduced in __main__:
-    The STOP-GRADIENT (+ predictor) is the load-bearing anti-collapse mechanism.
-    EMA decay is a quality/stability booster, NOT the anti-collapse guarantee.
-    Remove the stop-grad (symmetric, grad into both sides) -> the global minimum is a
-    constant vector -> std -> 0, loss -> 0 == real collapse.
+Goal of this file: Provide the complete, from-scratch implementation of the Joint-Embedding
+Predictive Architecture (JEPA), and empirically demonstrate exactly WHAT prevents 
+representation collapse.
 
-Topology (matches the pre-test answer):
-    context (masked) patches --> context_encoder --> predictor --(+ target positions)--> pred
-    full image -------------->  target_encoder (EMA, stop-grad) --[target_idx]--> tgt
-    loss = smooth_L1(pred, tgt)   in LATENT space
-Gradient flows context_encoder -> predictor. Target branch is a stop-grad, EMA-only label.
+The Collapse Problem: 
+    In joint-embedding architectures, if the model trivially maps all inputs to the same 
+    constant vector, the prediction loss drops to 0, but no semantic features are learned. 
+    A collapsing model is detected when the standard deviation of the target embeddings 
+    (`tgt_std`) crashes to 0 alongside the loss.
 
-Collapse detector: std of the target embeddings across the batch. If it -> 0 while the loss
-also -> 0, the model has cheated the loss by emitting a constant (collapse), NOT learned.
+This module implements two distinct anti-collapse mechanisms behind the `loss_mode` switch:
 
-STAGE-1 ADDITION (loss_mode switch): two anti-collapse mechanisms behind one flag.
-    loss_mode="ema"    -> Day-2 EMA-teacher + stop-grad (default, unchanged).
-    loss_mode="lejepa" -> shared encoder, NO stop-grad, NO teacher; SIGReg (src/sigreg.py)
-                          ALONE prevents collapse (LeJEPA, Balestriero & LeCun 2025). This is
-                          the exact grad-into-target topology that COLLAPSED in Day-2, rescued
-                          by the regularizer. See _forward_lejepa.
+Mode 1: "ema" (The Asymmetric Baseline, e.g., I-JEPA, SimSiam)
+    Topology:
+        context (masked) patches --> context_encoder --> predictor --(+ target pos)--> pred
+        full image ---------------> target_encoder (EMA, stop-grad) -[target_idx]--> tgt
+        loss = smooth_L1(pred, tgt)
+    Mechanism: 
+        The STOP-GRADIENT on the target branch is the load-bearing mechanism that prevents 
+        collapse. The EMA target encoder simply provides a stable, slowly-evolving teacher. 
+        If you remove the stop-grad in this setup, the model collapses immediately.
+
+Mode 2: "lejepa" (The Symmetric Architecture, Balestriero & LeCun 2025)
+    Topology:
+        context (masked) patches --> shared_encoder ---> predictor --(+ target pos)--> pred
+        full image ---------------> shared_encoder (WITH GRAD) -----[target_idx]--> tgt
+        loss = smooth_L1(pred, tgt) + lambda * SIGReg(full_embeddings)
+    Mechanism: 
+        Shared encoder, NO stop-gradient, NO EMA teacher. Gradients flow directly into the 
+        target branch. Normally, this topology guarantees collapse. Here, it is rescued 
+        entirely by Sketched Isotropic Gaussian Regularization (SIGReg). SIGReg analytically 
+        prevents collapse by forcing the entire latent distribution toward a maximum-entropy 
+        Gaussian N(0, I).
+
+The `__main__` block runs a synthetic empirical test to prove that both the stop-gradient 
+and SIGReg successfully keep `tgt_std` healthy, while a symmetric model without SIGReg crashes.
 """
 import copy
 import torch
@@ -240,9 +252,19 @@ class JEPA(nn.Module):
         # (optional) stash components for logging / collapse watch:
         self.last_pred = pred_loss.item()
         self.last_reg = reg.item()
-        self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()   # collapse detector
+        self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()   # COMPLETE-collapse detector
 
-        # Return (loss, tgt) to match _forward_ema so train()'s collapse detector (tgt.std) works.
+        # Effective rank (participation ratio) of the target embeddings -> catches DIMENSIONAL
+        # collapse: variance stays healthy but piles onto a few dims, which tgt_std alone misses
+        # (and which often drops BEFORE tgt_std craters). PR = tr(C)^2 / ||C||_F^2 in [1, d];
+        # ~d = full-rank isotropic (healthy), -> 1 = rank-1 collapse. No eigendecomposition needed.
+        with torch.no_grad():
+            z = tgt.detach().reshape(-1, tgt.size(-1)).float()
+            z = z - z.mean(dim=0, keepdim=True)
+            C = (z.t() @ z) / z.size(0)                     # (d, d) covariance, cheap at d=1024
+            tr = torch.diagonal(C).sum()
+            self.last_eff_rank = (tr * tr / (C.pow(2).sum() + 1e-12)).item()
+
         return loss, tgt
 
     def step_ema(self):

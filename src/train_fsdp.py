@@ -434,7 +434,8 @@ def main():
             extra = ""
             if args.loss == "lejepa":
                 j = core.jepa
-                extra = f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} tgt_std {j.last_tgt_std:.4f}"
+                extra = (f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} "
+                         f"tgt_std {j.last_tgt_std:.4f} eff_rank {j.last_eff_rank:.1f}")
             rprint(f"step {step:>4} loss {loss.item():.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
     torch.cuda.synchronize()
