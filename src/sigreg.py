@@ -1,28 +1,31 @@
-"""Day 2 (★) - SIGReg from scratch: Sketched Isotropic Gaussian Regularization.
+"""SIGReg: Sketched Isotropic Gaussian Regularization.
 
-This is the core of LeJEPA (Balestriero & LeCun, 2025, arXiv 2511.08544): replace the
-EMA-teacher + stop-grad anti-collapse *heuristics* with ONE principled objective -
-push the embedding distribution toward an isotropic Gaussian N(0, I).
+Goal of this file: Implement the mathematical engine of LeJEPA (Balestriero & LeCun, 2025). 
+This module replaces standard anti-collapse heuristics (like EMA teachers and stop-gradients) 
+with a single, principled statistical objective: explicitly forcing the embedding distribution 
+to match an isotropic Gaussian N(0, I).
 
-Why it can't collapse: an isotropic Gaussian is the maximum-entropy distribution for a
-fixed variance, so it carries maximal information. A collapsed (constant / low-rank)
-embedding is maximally *non*-Gaussian, so the regularizer repels it.
+The Anti-Collapse Mechanism:
+    An isotropic Gaussian represents the maximum-entropy distribution for a given variance, 
+    meaning it carries maximal information. Conversely, a collapsed representation (where all 
+    inputs map to a constant or low-rank subspace) is maximally non-Gaussian. By explicitly 
+    penalizing distance from N(0, I), the regularizer naturally repels collapse.
 
-How it scales (Cramer-Wold): a distribution is N(0, I) IFF every 1-D projection of it is
-N(0, 1). So we sketch: draw random unit directions, project embeddings onto each, and test
-each 1-D projection against N(0, 1). Many cheap 1-D tests == one high-D test, in linear time.
+Mathematical Mechanics:
+    1. Cramer-Wold Theorem (The "Sketch"): Proving a high-dimensional distribution is N(0, I) 
+       is computationally intractable. However, Cramer-Wold states a distribution is N(0, I) 
+       if and only if *every* 1-D projection is N(0, 1). We approximate this by drawing 
+       random unit vectors (the sketch) and projecting the embeddings into 1-D.
+    2. Characteristic Function (The Test): We test the 1-D projections for normality using 
+       their empirical characteristic function (CF). We compute the mean squared difference 
+       between the empirical CF of our batch and the theoretical CF of a standard normal 
+       distribution (exp(-t^2/2)) across sampled frequencies.
 
-The 1-D test uses the characteristic function (CF). The CF of N(0,1) is exp(-t^2/2). We
-compare the empirical CF of the projected samples to that target over a set of frequencies
-t; the squared difference, weighted/averaged, is an Epps-Pulley-style normality statistic.
-
-NOTE: this is faithful *in spirit*; the official LeJEPA repo (github.com/rbalestr-lab/lejepa)
-uses a specific closed-form statistic. Compare against it during study.
-
-Distributed note: the regularizer is an expectation over the batch (means of cos/sin over
-samples), so at multi-GPU scale you all-reduce the per-device partial sums to get the
-global-batch statistic -- no negative-pair gathering. That's why SIGReg is distributed-friendly.
-Implemented below as sigreg_loss(..., distributed=True); correctness demo = verify_all_reducible().
+Distributed Scaling:
+    Because the CF calculation is a pure expectation (mean) over the batch, scaling to 
+    multi-GPU (FSDP/DDP) is highly efficient. Ranks simply all-reduce (sum) their local 
+    CF components to compute the global statistic. There is no need to gather or broadcast 
+    massive batches of negative pairs across the network.
 """
 import torch
 import torch.nn.functional as F
