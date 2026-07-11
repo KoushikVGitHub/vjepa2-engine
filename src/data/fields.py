@@ -163,7 +163,7 @@ class FieldMapDataset(Dataset):
             return
         H, W = self.maps.shape[1], self.maps.shape[2]
         path = self._cache_path()
-        tmp = f"{path}.tmp.{os.getpid()}"
+        tmp = f"{path}.tmp.{os.getpid()}.npz"   # must end in .npz, else np.savez appends it and os.replace misses the file
         try:
             np.savez(tmp, manifest=np.asarray(self.manifest, dtype=np.int64),
                      mean=self.mean, std=self.std, n_maps=len(self.maps),
