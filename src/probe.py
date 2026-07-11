@@ -339,8 +339,15 @@ def latent_atlas(encoder, loader, device, out_dir: str):
     X = np.concatenate(global_embeds, axis=0)
     C = np.concatenate(global_omega, axis=0)
 
-    pca = PCA(n_components=2)
+    # Fit a few components so we can report how concentrated the feature space is: if PC1+PC2
+    # explain ~all the variance, the probe's features are effectively rank-2 (independently
+    # confirms/refutes the training-time eff_rank collapse signal on the FULL unmasked features).
+    n_pc = min(10, X.shape[0], X.shape[1])
+    pca = PCA(n_components=n_pc)
     X_pca = pca.fit_transform(X)
+    evr = pca.explained_variance_ratio_
+    print("[atlas] PCA explained-variance ratio (top {}): {}  | cumulative top-2 = {:.3f}".format(
+        min(5, n_pc), ", ".join(f"{r:.3f}" for r in evr[:5]), float(evr[:2].sum())))
 
     plt.figure(figsize=(8, 6))
     sc = plt.scatter(X_pca[:, 0], X_pca[:, 1], c=C, cmap='viridis', alpha=0.6, s=15)
