@@ -25,7 +25,7 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 
 **Shipped so far:**
 - Curation of 12 both-suite fields into one pooled SSL corpus (~180k maps), with disk-cached manifests.
-- A from-scratch **ViT-L JEPA (~210M params)** trained with **LeJEPA / SIGReg** anti-collapse under **FSDP + bf16** on 2 GPUs — a stable 1000-step run (target-embedding std steady ~0.9, SIGReg at floor, no collapse; 72 samples/s, 12.2 GB/GPU peak).
+- A from-scratch **ViT-L JEPA (~210M params)** trained with **LeJEPA / SIGReg** anti-collapse under **FSDP + bf16** on 2 GPUs — a stable 1000-step run (target-embedding std steady ~0.9, SIGReg at floor; 72 samples/s, 12.2 GB/GPU peak). Effective-rank monitoring then caught what the healthy std masked: *dimensional* collapse (rank ≈ 2), now addressed with a covariance regularizer + target normalization (see the probe plan).
 - A frozen-encoder **cosmology probe**: a small `(μ, σ)` moment head regressing Ω_m/σ8, with a latent-space atlas for interpretability.
 
 ### Cosmology probe — 🚧 work in progress
@@ -36,10 +36,11 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 
 **Plan to get it working:**
 1. **Scale pretraining** — 1000 steps (~64k samples) is a smoke run; real SSL needs 100k+ steps. This is the single biggest lever.
-2. **Relax the SIGReg weight** (λ 0.7 → 0.5) to trade a little stability for richer, higher-rank features.
-3. **Probe all 6 parameters** — expect high R² on Ω_m/σ8 and near-zero on the 4 astrophysical nuisance params (as the supervised benchmark shows), which would demonstrate the **astro-insensitivity** that the SSL-cosmology literature explicitly wants.
-4. **Held-out SIMBA** cross-suite robustness eval (normalizing with the training suite's statistics, per the benchmark convention).
-5. **Multi-field input channels** — the strongest published SSL result on CAMELS uses multi-channel input.
+2. **Fix the dimensional collapse at its source.** SIGReg's per-projection (marginal Cramér–Wold) test is nearly blind to *anisotropic* collapse when total variance is spread right — measured gradient ≈ 2e-4 at rank-2 vs ≈ 1.2 for a covariance penalty. Added alongside SIGReg: a VICReg-style **variance-hinge + off-diagonal covariance** term; **target LayerNorm** (removes the shrink-to-constant collapse driver); **exact periodic augmentation** (roll/rot/flip — the CAMELS box is periodic) for view diversity; and **multi-block masking** (target ratio 6% → 22%) to demand richer features. `eff_rank` is now the tracked success metric, gated by a short 300-step sweep before the keeper.
+3. **Attentive probe readout** — a learnable-query attention pool replaces mean-pooling (DINOv2 / I-JEPA eval standard); the encoder stays frozen, so it's still an honest test of the features.
+4. **Probe all 6 parameters** — expect high R² on Ω_m/σ8 and near-zero on the 4 astrophysical nuisance params (as the supervised benchmark shows), which would demonstrate the **astro-insensitivity** that the SSL-cosmology literature explicitly wants.
+5. **Held-out SIMBA** cross-suite robustness eval (normalizing with the training suite's statistics, per the benchmark convention).
+6. **Multi-field input channels** — the strongest published SSL result on CAMELS uses multi-channel input.
 
 ## Highlights (the parts worth reading)
 - **SIGReg is distributed-friendly by construction** — its anti-collapse regularizer is an expectation over the batch, so at scale you just **all-reduce per-GPU partial statistics** for the global-batch statistic; no cross-device negative-pair gathering (contrast: SimCLR). Shipped with a correctness test: world=2 × batch-B ≡ world=1 × batch-2B in loss *and* gradient.
@@ -47,14 +48,37 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 - **Curation is a *policy*, not a constant** — rejection thresholds read off the empirical distribution's tail; disk-cached manifests make reruns instant and turn N re-scans into 1.
 - **Collapse is monitored, not hoped for** — target-std *and* effective rank (participation ratio) are logged every run, which surfaced a genuine low-rank finding rather than hiding it.
 
+## Repository layout
+
+```
+src/            # production engine — the dataset-agnostic library + CAMELS pipeline
+  jepa_loss.py    JEPA model + LeJEPA loss (pure library, no toy-training code)
+  sigreg.py       SIGReg + VICReg var/cov regularizers; `--verify` distributed gate
+  train_fsdp.py   FSDP/DDP + bf16 distributed trainer
+  probe.py        frozen-encoder cosmology probe (attentive head, moment loss, atlas)
+  data/           CAMELS field loader + curation
+scripts/        # production drivers (run the probe, analyze fields)
+study/          # the from-scratch fundamentals — imports the library from src/, nothing here is imported back
+  collapse_study.py       synthetic study: stop-grad vs EMA vs SIGReg (what actually stops collapse)
+  sigreg_demo.py          SIGReg sanity demo (~0 for N(0,I), large for collapsed)
+  analysis/               ablations (SIGReg frequency/dimension blind-spot, failure modes)
+  notes/                  study notes + logged results
+```
+
+The split is one-directional: `study/` depends on `src/`, never the reverse — so the production engine carries no pedagogical code, and the learning artifacts stay runnable against the real library.
+
 ## Quickstart
 ```bash
 pip install -r requirements.txt
 
 # Stage 3 — distributed LeJEPA training on CAMELS fields (2 GPUs)
-# (--sigreg-lambda 0.7 --lr 5e-5 is the stable config; the defaults collapse at ViT-L)
+# SIGReg (--sigreg-lambda 0.7) prevents COMPLETE collapse but is nearly blind to ANISOTROPIC
+# (dimensional) collapse -- healthy per-dim std yet eff_rank ~2. The VICReg var/cov terms
+# (--var-coef/--cov-coef) and target normalization (--target-norm) supply the strong, correctly-
+# directed gradient against low rank that SIGReg lacks. Watch `eff_rank` in the logs.
 torchrun --standalone --nproc_per_node=2 src/train_fsdp.py \
   --mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 \
+  --var-coef 1e-2 --cov-coef 2e-2 --target-norm \
   --d 1024 --layers 24 --heads 16 \
   --steps 1000 --batch 32 --save /workspace/ckpt.pt
 

@@ -106,14 +106,15 @@ class JEPAStep(nn.Module):
         loops can easily digest.
     """
 
-    def __init__(self, jepa: JEPA, grid: int, block: int):
+    def __init__(self, jepa: JEPA, grid: int, block: int, n_blocks: int = 1):
         super().__init__()
         self.jepa = jepa
         self.grid = grid
         self.block = block
+        self.n_blocks = n_blocks
 
     def forward(self, x, sigreg_generator=None, sigreg_distributed=False):
-        ctx_idx, tgt_idx = random_block_mask(self.grid, self.block, x.device)
+        ctx_idx, tgt_idx = random_block_mask(self.grid, self.block, x.device, self.n_blocks)
         # sigreg_* thread down to _forward_lejepa (ignored in ema mode).
         loss, _ = self.jepa(x, ctx_idx, tgt_idx,
                             sigreg_generator=sigreg_generator,
@@ -150,8 +151,10 @@ def build_model(args, device):
     pred = ViTPredictor(grid * grid, d=args.d, pred_d=args.pred_d,
                         heads=args.pred_heads, layers=args.pred_layers)
     jepa = JEPA(enc, pred, ema_decay=0.998, stop_grad=True,
-                loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda)
-    return JEPAStep(jepa, grid, block=args.block).to(device)
+                loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda,
+                var_coef=args.var_coef, cov_coef=args.cov_coef,
+                target_norm=args.target_norm)
+    return JEPAStep(jepa, grid, block=args.block, n_blocks=args.n_blocks).to(device)
 
 
 def wrap_fsdp(model, args, device):
@@ -340,7 +343,8 @@ def build_dataloader(args, world, rank):
 
     # 2. Pool all specified field files into ONE large corpus
     ds = ConcatDataset([
-        FieldMapDataset(size=args.img, **config) for config in field_configs
+        FieldMapDataset(size=args.img, augment=not args.no_augment, **config)
+        for config in field_configs
     ])
 
     # 3. Create the distributed sampler
@@ -435,6 +439,7 @@ def main():
             if args.loss == "lejepa":
                 j = core.jepa
                 extra = (f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} "
+                         f"var {j.last_var:.4f} cov {j.last_cov:.4f} "
                          f"tgt_std {j.last_tgt_std:.4f} eff_rank {j.last_eff_rank:.1f}")
             rprint(f"step {step:>4} loss {loss.item():.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
@@ -465,6 +470,13 @@ def parse_args():
     p.add_argument("--mode", choices=["ddp", "fsdp"], default="fsdp")
     p.add_argument("--loss", choices=["ema", "lejepa"], default="lejepa")
     p.add_argument("--sigreg-lambda", type=float, default=0.02)
+    p.add_argument("--var-coef", type=float, default=0.0,
+                   help="VICReg variance-hinge weight (anisotropic-collapse patch; try ~1e-2)")
+    p.add_argument("--cov-coef", type=float, default=0.0,
+                   help="VICReg off-diagonal covariance weight (decorrelation; try ~2e-2)")
+    p.add_argument("--target-norm", action="store_true",
+                   help="no-affine LayerNorm pred & tgt before the L1 (removes the shrink-to-"
+                        "constant collapse driver; I-JEPA/V-JEPA target normalization)")
     p.add_argument("--data-root", type=str, default="/workspace/data",
                    help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy")
     p.add_argument("--fields", type=lambda s: [f for f in s.split(",") if f],
@@ -472,6 +484,9 @@ def parse_args():
                    help="comma-separated CAMELS fields to pool; default = all 12 both-suite fields. "
                         "Trim for fast iteration, e.g. --fields Mgas (missing files auto-skipped).")
     p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--no-augment", action="store_true",
+                   help="disable exact periodic symmetry augmentation (roll/rot90/flip) on the "
+                        "SSL corpus; augmentation is ON by default and helps feature rank")
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--save", type=str, default="",
                    help="path to save a gathered FULL_STATE_DICT checkpoint (empty = skip)")
@@ -480,6 +495,9 @@ def parse_args():
     p.add_argument("--img", type=int, default=256, help="CAMELS 2D maps are 256x256")
     p.add_argument("--patch", type=int, default=16)
     p.add_argument("--block", type=int, default=4, help="target block size on the patch grid")
+    p.add_argument("--n-blocks", type=int, default=4,
+                   help="number of target blocks (I-JEPA multi-block); 1 = the old single-block "
+                        "easy task. 4 blocks of size 4 on a 16x16 grid ~= up to 25%% target.")
     p.add_argument("--d", type=int, default=768)
     p.add_argument("--heads", type=int, default=12)
     p.add_argument("--layers", type=int, default=12)

@@ -32,7 +32,7 @@ class FieldMapDataset(Dataset):
     def __init__(self, npy_path: str, name: str = "field", transform: str = "log10",
                  manifest=None, min_std=None, size: int = 256,
                  params_path: str = None, return_params: bool = False,
-                 use_cache: bool = True):
+                 use_cache: bool = True, augment: bool = False):
         """
         Initializes the dataset object, establishes the memory-mapped link to the physical file,
         and orchestrates the dataset's preparation phase. It automatically triggers the offline
@@ -47,6 +47,11 @@ class FieldMapDataset(Dataset):
         self.size = size
         self.min_std = min_std
         self.use_cache = use_cache            # cache the (manifest, mean, std) to disk, skip re-scan
+        # EXACT symmetry augmentation (SSL pretraining only). CAMELS boxes have PERIODIC boundaries,
+        # so a circular shift (torch.roll) is a true translation with no edge artifacts -- and the
+        # sim params (Omega_m, sigma_8, ...) are invariant under translation/rotation/reflection, so
+        # y is untouched. Off by default -> probe train/eval get deterministic, un-augmented views.
+        self.augment = augment
 
         # Optional labels for the probe: (n_sims, 6) params, ONE ROW PER SIM.
         self.return_params = return_params
@@ -226,6 +231,30 @@ class FieldMapDataset(Dataset):
                   f"(mean={self.mean:.4f}, std={self.std:.4f}).")
             self._save_cache()               # persist so the next run skips this scan entirely
 
+    def _augment(self, x: torch.Tensor) -> torch.Tensor:
+        """Exact periodic-symmetry augmentation on a (1, H, W) map (train-time only).
+
+        The CAMELS box is periodic, so these are the field's true symmetry group -- no
+        interpolation, no padding, no edge artifacts, and the cosmological/astro labels are
+        invariant under all of them:
+          - circular shift (torch.roll) by a random pixel offset on each axis = exact translation;
+          - random 90-degree rotation (k in 0..3) and independent H/V flips = the dihedral group.
+        More decorrelated views per map -> richer, higher-rank features (attacks the collapse from
+        the data side, complementing the covariance regularizer on the loss side).
+        """
+        H, W = x.shape[-2], x.shape[-1]
+        sh = int(torch.randint(0, H, (1,)))
+        sw = int(torch.randint(0, W, (1,)))
+        x = torch.roll(x, shifts=(sh, sw), dims=(-2, -1))
+        k = int(torch.randint(0, 4, (1,)))
+        if k:
+            x = torch.rot90(x, k, dims=(-2, -1))
+        if torch.rand(()) < 0.5:
+            x = torch.flip(x, dims=(-1,))
+        if torch.rand(()) < 0.5:
+            x = torch.flip(x, dims=(-2,))
+        return x.contiguous()
+
     # --------------------------------------------------------------------- torch Dataset API
     def __len__(self):
         """
@@ -245,6 +274,9 @@ class FieldMapDataset(Dataset):
         m = self._load_map(real_idx)
         m = (m - self.mean) / self.std
         x = torch.from_numpy(m).float().unsqueeze(0)         # (1, H, W)
+
+        if self.augment:
+            x = self._augment(x)
 
         if self.return_params:
             sim_idx = real_idx // self.maps_per_sim

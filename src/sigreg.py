@@ -136,6 +136,44 @@ def sigreg_loss(z: torch.Tensor, n_proj: int = 256, n_freq: int = 64,
     return loss
 
 
+def variance_covariance_reg(z: torch.Tensor, gamma: float = 1.0, eps: float = 1e-4):
+    """VICReg-style variance-hinge + off-diagonal covariance penalty (Bardes et al. 2022).
+
+    WHY this exists alongside SIGReg: SIGReg's Cramer-Wold sketch tests each 1-D projection
+    MARGINALLY. That test is nearly blind to ANISOTROPIC (dimensional) collapse -- a rank-r blob
+    whose total variance is spread so that a typical random 1-D projection still looks like a
+    ~unit-variance Gaussian passes SIGReg with a tiny gradient, yet has effective rank << D. We
+    measured this on the real encoder shape: at a rank-2 state SIGReg's gradient norm is ~2e-4,
+    while this term's is ~1.2 (~6000x stronger), because low rank IS off-diagonal correlation.
+
+    Two components, returned separately so the caller can weight them:
+      - variance hinge  mean_j relu(gamma - std_j): keeps every dim's std >= gamma. Its gradient
+        does NOT vanish as std -> 0 (unlike SIGReg's), so it can push a dead direction back out.
+      - covariance term mean of squared OFF-diagonal covariances: decorrelates the dims, directly
+        dissolving the low-rank structure.
+
+    Computed on the LOCAL shard (no all-reduce): like the original VICReg, batch-local statistics
+    are an acceptable estimator here (B*n tokens per rank >> D), and a decorrelation force needs no
+    exact global expectation the way SIGReg's nonlinear CF does. Cast to fp32 for the covariance
+    (bf16 z.t()@z loses precision at D=768/1024).
+
+    Args:
+        z: (N, D) batch of embeddings (NOT pre-standardized); N = B*n_tokens on this rank.
+        gamma: target per-dimension std the hinge defends (VICReg default 1.0).
+    Returns:
+        (var_loss, cov_loss) scalars.
+    """
+    z = z.float()
+    z = z - z.mean(dim=0, keepdim=True)
+    std = torch.sqrt(z.var(dim=0) + eps)                 # (D,)
+    var_loss = torch.relu(gamma - std).mean()
+    N, D = z.shape
+    C = (z.t() @ z) / (N - 1)                            # (D, D) covariance
+    off_sq = C.pow(2).sum() - torch.diagonal(C).pow(2).sum()
+    cov_loss = off_sq / D
+    return var_loss, cov_loss
+
+
 def verify_all_reducible(B: int = 512, D: int = 64, seed: int = 0):
     """
     A diagnostic testing utility to mathematically prove that the distributed 
@@ -209,22 +247,11 @@ def verify_all_reducible(B: int = 512, D: int = 64, seed: int = 0):
 
 
 if __name__ == "__main__":
+    # Production entry point = the DISTRIBUTED correctness gate only. Run:
+    #   torchrun --standalone --nproc_per_node=2 src/sigreg.py --verify
+    # The pedagogical sanity demo (SIGReg ~0 for N(0,I), large for collapsed) moved to
+    # study/sigreg_demo.py so this module stays a pure library.
     if "--verify" in sys.argv:
         verify_all_reducible()
         raise SystemExit(0)
-
-    # Sanity demo: SIGReg should be ~0 for true N(0,I), and LARGE for collapsed/structured data.
-    torch.manual_seed(0)
-    B, D = 4096, 64
-
-    gaussian = torch.randn(B, D)                       # the target distribution
-    collapsed = torch.zeros(B, D) + 0.01 * torch.randn(1, D)  # near-constant == collapse
-    scaled = 5.0 * torch.randn(B, D)                   # right shape, wrong variance
-    uniform = (torch.rand(B, D) - 0.5) * 3.46          # zero-mean, ~unit-var, but NOT Gaussian
-
-    for name, x in [("N(0,I) target", gaussian),
-                    ("collapsed", collapsed),
-                    ("scaled var=25", scaled),
-                    ("uniform", uniform)]:
-        print(f"{name:18s} SIGReg = {sigreg_loss(x).item():.5f}")
-    # Expected: target ~0; collapsed and scaled large; uniform small-but-nonzero.
+    print("Nothing to run without --verify. For the SIGReg sanity demo: python study/sigreg_demo.py")

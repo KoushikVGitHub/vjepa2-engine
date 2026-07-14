@@ -42,7 +42,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sigreg import sigreg_loss   # LeJEPA anti-collapse regularizer (see src/sigreg.py, Day-2 star)
+from sigreg import sigreg_loss, variance_covariance_reg   # LeJEPA reg + VICReg anisotropy patch
 
 
 # --------------------------------------------------------------------------- EMA + masking
@@ -65,27 +65,30 @@ def ema_update(target: nn.Module, online: nn.Module, decay: float = 0.998):
         pt.mul_(decay).add_(po, alpha=1 - decay)
 
 
-def random_block_mask(grid: int, block: int, device):
+def random_block_mask(grid: int, block: int, device, n_blocks: int = 1):
     """
     Generates a spatial block mask to partition an image into context and target regions.
 
     Behavior:
-        Selects a random contiguous square block (size `block` x `block`) on a 2D patch 
-        grid (size `grid` x `grid`). The indices falling inside the block become the 
-        target tokens; everything else becomes the context tokens.
+        Selects `n_blocks` random contiguous square blocks (each `block` x `block`) on a 2D
+        patch grid (size `grid` x `grid`). Their UNION becomes the target tokens; everything
+        else is context. Overlaps are handled naturally by the boolean OR, so the effective
+        target ratio is at most n_blocks*block^2 / grid^2 (less when blocks overlap).
 
     Role in Program:
-        Provides the token-level masking indices required to force the network to 
-        predict missing regions (I-JEPA style) rather than trivially copying inputs.
+        Forces the network to predict missing regions (I-JEPA style). A SINGLE small block is
+        a trivially easy task (a low-rank cheat suffices, feeding dimensional collapse); several
+        blocks covering ~15-25% make the prediction hard enough to demand richer features.
     """
 
-    top = torch.randint(0, grid - block + 1, (1,)).item()
-    left = torch.randint(0, grid - block + 1, (1,)).item()
     all_idx = torch.arange(grid * grid, device=device)
     is_target = torch.zeros(grid * grid, dtype=torch.bool, device=device)
-    for r in range(top, top + block):
-        for c in range(left, left + block):
-            is_target[r * grid + c] = True
+    for _ in range(n_blocks):
+        top = torch.randint(0, grid - block + 1, (1,)).item()
+        left = torch.randint(0, grid - block + 1, (1,)).item()
+        for r in range(top, top + block):
+            for c in range(left, left + block):
+                is_target[r * grid + c] = True
     target_idx = all_idx[is_target]
     context_idx = all_idx[~is_target]
     return context_idx, target_idx
@@ -174,7 +177,8 @@ class JEPA(nn.Module):
     """
 
     def __init__(self, encoder, predictor, ema_decay=0.998, stop_grad=True,
-                 loss_mode="ema", sigreg_lambda=0.02):
+                 loss_mode="ema", sigreg_lambda=0.02,
+                 var_coef=0.0, cov_coef=0.0, target_norm=False):
         super().__init__()
         self.context_encoder = encoder
         self.predictor = predictor
@@ -182,6 +186,13 @@ class JEPA(nn.Module):
         self.stop_grad = stop_grad                                    # ema-mode: the load-bearing switch
         self.loss_mode = loss_mode                                    # "ema" | "lejepa"
         self.sigreg_lambda = sigreg_lambda                            # LeJEPA reg weight (paper: 0.02)
+        # Anisotropic-collapse patch (lejepa mode). SIGReg's marginal test barely resists rank
+        # collapse when total variance is spread right; the VICReg var/cov term does (see sigreg.py).
+        self.var_coef = var_coef                                     # variance-hinge weight (~1e-2)
+        self.cov_coef = cov_coef                                     # off-diagonal decorrelation (~2e-2)
+        # Normalize (no-affine LayerNorm) pred & tgt before the L1: removes the "shrink the target
+        # toward a constant" shortcut that DRIVES collapse. This is the I-JEPA/V-JEPA target-norm.
+        self.target_norm = target_norm
 
         # EMA teacher exists ONLY in ema mode. In lejepa there is no teacher (SIGReg replaces
         # stop-grad), so skip the deepcopy -> saves ~a whole encoder's params of dead memory
@@ -237,29 +248,47 @@ class JEPA(nn.Module):
         # (4) Predict target latents from context.
         pred = self.predictor(ctx, context_idx, target_idx)
 
-        # (5) Prediction loss in latent space.
-        pred_loss = F.smooth_l1_loss(pred, tgt)
+        # (5) Prediction loss in latent space. When target_norm is on, no-affine LayerNorm both
+        #     sides first: the L1 then measures SHAPE agreement, so shrinking tgt toward a constant
+        #     no longer lowers the loss (constant -> undefined after norm) -> collapse driver removed.
+        if self.target_norm:
+            d = pred.size(-1)
+            pred_loss = F.smooth_l1_loss(F.layer_norm(pred, (d,)), F.layer_norm(tgt, (d,)))
+        else:
+            pred_loss = F.smooth_l1_loss(pred, tgt)
 
         # (6) SIGReg over ALL token embeddings: flatten (B, n, d) -> (B*n, d), regularize toward
         #     N(0, I). In distributed training the loop passes a rank-synced generator + the
         #     distributed flag so the ECF sums all-reduce into a global-batch statistic.
-        reg = sigreg_loss(full.reshape(-1, full.size(-1)),
-                          generator=sigreg_generator, distributed=sigreg_distributed)
+        full_flat = full.reshape(-1, full.size(-1))
+        reg = sigreg_loss(full_flat, generator=sigreg_generator, distributed=sigreg_distributed)
 
-        # (7) Combine with the LeJEPA weight.
-        loss = (1 - self.sigreg_lambda) * pred_loss + self.sigreg_lambda * reg
+        # (6b) VICReg var-hinge + off-diagonal covariance on the SAME full embeddings. SIGReg alone
+        #      barely resists anisotropic (dimensional) collapse; this term supplies the strong,
+        #      correctly-directed gradient against low rank. Local-shard stats (see sigreg.py).
+        if self.var_coef > 0 or self.cov_coef > 0:
+            var_l, cov_l = variance_covariance_reg(full_flat)
+        else:
+            var_l = cov_l = torch.zeros((), device=full.device)
+
+        # (7) Combine: LeJEPA prediction/SIGReg balance + the anisotropy patch.
+        loss = ((1 - self.sigreg_lambda) * pred_loss + self.sigreg_lambda * reg
+                + self.var_coef * var_l + self.cov_coef * cov_l)
 
         # (optional) stash components for logging / collapse watch:
         self.last_pred = pred_loss.item()
         self.last_reg = reg.item()
+        self.last_var = var_l.item()
+        self.last_cov = cov_l.item()
         self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()   # COMPLETE-collapse detector
 
-        # Effective rank (participation ratio) of the target embeddings -> catches DIMENSIONAL
-        # collapse: variance stays healthy but piles onto a few dims, which tgt_std alone misses
-        # (and which often drops BEFORE tgt_std craters). PR = tr(C)^2 / ||C||_F^2 in [1, d];
-        # ~d = full-rank isotropic (healthy), -> 1 = rank-1 collapse. No eigendecomposition needed.
+        # Effective rank (participation ratio) -> catches DIMENSIONAL collapse: variance stays
+        # healthy but piles onto a few dims, which tgt_std alone misses (and which often drops
+        # BEFORE tgt_std craters). PR = tr(C)^2 / ||C||_F^2 in [1, d]; ~d = full-rank isotropic
+        # (healthy), -> 1 = rank-1 collapse. Measured on `full` (all tokens = what SIGReg sees and
+        # the probe pools), which is the true collapse signal, not just the target subset.
         with torch.no_grad():
-            z = tgt.detach().reshape(-1, tgt.size(-1)).float()
+            z = full_flat.detach().float()
             z = z - z.mean(dim=0, keepdim=True)
             C = (z.t() @ z) / z.size(0)                     # (d, d) covariance, cheap at d=1024
             tr = torch.diagonal(C).sum()
@@ -273,83 +302,5 @@ class JEPA(nn.Module):
             ema_update(self.target_encoder, self.context_encoder, self.ema_decay)
 
 
-# --------------------------------------------------------------------------- toy data + train
-def make_batch(B, img=16, device="cpu"):
-    """
-    Generates synthetic, spatially-correlated image batches for training tests.
-
-    Behavior:
-        Creates a tensor of smoothed random noise, normalized to unit variance. 
-        The smoothing ensures that local patches have structural similarity to their 
-        neighbors, making the context predictive of the targets (essential for a 
-        JEPA to actually learn rather than randomly guess).
-    """
-    x = torch.randn(B, 1, img, img, device=device)
-    x = F.avg_pool2d(x, 5, stride=1, padding=2)                       # blur -> local structure
-    return (x - x.mean()) / (x.std() + 1e-6)
-
-
-def train(decay=0.998, stop_grad=True, loss_mode="ema", sigreg_lambda=0.02,
-          steps=300, B=128, img=16, patch=4, d=64, seed=0, device="cpu"):
-    """
-    A minimal training loop designed to empirically test representation collapse.
-
-    Behavior:
-        Initializes the model architecture under specific configurations (EMA settings, 
-        stop-gradient flags, loss modes). It loops through dummy batches, computing 
-        losses and optimizing the networks. It tracks the standard deviation (`tgt_std`) 
-        of the target embeddings.
-        
-    Role in Program:
-        The empirical testbed that falsifies the 'EMA prevents collapse' hypothesis and 
-        proves that either a stop-gradient (JEPA) or an explicit regularization term 
-        like SIGReg (LeJEPA) is necessary to keep embeddings from collapsing to a constant.
-    """
-    
-    torch.manual_seed(seed)
-    enc = ViTEncoder(img, patch, d)
-    grid = img // patch
-    pred = ViTPredictor(grid * grid, d=d, pred_d=d, heads=4, layers=2)
-    model = JEPA(enc, pred, ema_decay=decay, stop_grad=stop_grad,
-                 loss_mode=loss_mode, sigreg_lambda=sigreg_lambda).to(device)
-    opt = torch.optim.Adam(
-        list(model.context_encoder.parameters()) + list(model.predictor.parameters()), lr=1e-3)
-
-    traj = []
-    for step in range(steps):
-        x = make_batch(B, img, device)
-        ctx_idx, tgt_idx = random_block_mask(grid, block=2, device=device)
-        loss, tgt = model(x, ctx_idx, tgt_idx)
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        model.step_ema()
-        if step % 50 == 0 or step == steps - 1:
-            std = tgt.detach().std(dim=0).mean().item()               # collapse detector
-            traj.append((step, loss.item(), std))
-    return traj
-
-
-if __name__ == "__main__":
-    print("Day-2 build: WHAT actually prevents collapse? (corrected after the first run)\n")
-    print("Hypothesis under test: it's the STOP-GRADIENT, not the EMA decay (SimSiam, 2020).\n")
-    configs = [
-        ("no stop-grad (symmetric)",   dict(decay=0.998, stop_grad=False)),
-        ("stop-grad, decay=0.0",       dict(decay=0.0,   stop_grad=True)),
-        ("stop-grad, decay=0.998",     dict(decay=0.998, stop_grad=True)),
-        ("lejepa (SIGReg, grad->tgt)", dict(loss_mode="lejepa")),
-    ]
-    print(f"{'config':>26} | {'step':>4} {'loss':>9} {'tgt_std':>9}")
-    for name, kw in configs:
-        traj = train(**kw)
-        for (step, loss, std) in traj:
-            tag = ""
-            if step == traj[-1][0]:
-                tag = "  <- COLLAPSED" if std < 0.05 else "  <- healthy"
-            print(f"{name:>26} | {step:>4} {loss:>9.5f} {std:>9.5f}{tag}")
-        print("-" * 64)
-    print("\nReading: removing the stop-grad (symmetric) -> std->0 & loss->0 == COLLAPSE.")
-    print("         WITH stop-grad, even decay=0.0 stays healthy -> EMA is a stabilizer,")
-    print("         the stop-gradient (+predictor) is the load-bearing anti-collapse piece.")
-    print("         lejepa: SAME grad-into-target topology, but SIGReg keeps std healthy ->")
-    print("         SIGReg REPLACES stop-grad as the anti-collapse mechanism (LeJEPA).")
+# The synthetic collapse study (make_batch + train + the config comparison) lives in
+# study/collapse_study.py -- it imports the classes above. This module stays a pure library.

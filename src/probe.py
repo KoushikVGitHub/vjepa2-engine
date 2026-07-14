@@ -76,13 +76,35 @@ def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
 
 
 # --------------------------------------------------------------------- probe head
+class AttentivePool(nn.Module):
+    """Cross-attention pooling: a single learnable query attends over the token sequence.
+
+    Mean-pooling weights every patch equally, which dilutes the few tokens that actually carry
+    the cosmological signal (and is especially lossy on a low-rank representation). A learnable
+    query with multi-head attention lets the probe LEARN which tokens to read -- the DINOv2 /
+    I-JEPA linear-eval standard. Still cheap and, crucially, the encoder stays frozen: only this
+    pool + the MLP train, so it remains an honest test of the frozen features.
+    """
+
+    def __init__(self, d: int, heads: int = 8):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, d) * 0.02)
+        self.attn = nn.MultiheadAttention(d, heads, batch_first=True)
+        self.norm = nn.LayerNorm(d)
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        q = self.query.expand(tokens.size(0), -1, -1)      # (B, 1, d)
+        pooled, _ = self.attn(q, tokens, tokens)           # (B, 1, d)
+        return self.norm(pooled.squeeze(1))                # (B, d)
+
+
 class ProbeHead(nn.Module):
     """
-    A lightweight Multi-Layer Perceptron predicting posterior moments.
+    A lightweight pooling + MLP head predicting posterior moments.
 
     Behavior:
-        Takes a sequence of patch tokens, applies mean-pooling to collapse them into a
-        single global vector, and passes this through a hidden layer. It outputs two
+        Pools a sequence of patch tokens into one global vector -- via attentive pooling
+        (default) or mean-pooling -- and passes it through a hidden layer. It outputs two
         values per predicted parameter: a predicted mean (mu) and a strictly positive
         standard deviation (sigma, enforced via softplus).
 
@@ -92,9 +114,11 @@ class ProbeHead(nn.Module):
         associated uncertainties.
     """
 
-    def __init__(self, d: int, n_params: int = 2):
+    def __init__(self, d: int, n_params: int = 2, pool: str = "attn", heads: int = 8):
         super().__init__()
         self.n_params = n_params
+        self.pool_mode = pool
+        self.pool = AttentivePool(d, heads=heads) if pool == "attn" else None
 
         # Simple MLP structure
         self.mlp = nn.Sequential(
@@ -105,7 +129,7 @@ class ProbeHead(nn.Module):
 
     def forward(self, tokens: torch.Tensor):
         # Pool the sequence of tokens: (B, n_tokens, d) -> (B, d)
-        pooled = tokens.mean(dim=1)
+        pooled = self.pool(tokens) if self.pool is not None else tokens.mean(dim=1)
 
         # Output is (B, 2 * n_params)
         out = self.mlp(pooled)
