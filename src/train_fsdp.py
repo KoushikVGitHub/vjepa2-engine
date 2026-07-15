@@ -9,6 +9,7 @@ the effect of FSDP, bf16 mixed precision, and activation checkpointing.
 import os
 import math
 import time
+import shutil
 import argparse
 import functools
 
@@ -246,6 +247,50 @@ def save_checkpoint(model, args, path):
         rprint(f"[ckpt] saved -> {path}")
 
 
+def check_disk(args, n_online):
+    """Warn up front if --save-every will run the volume out of space mid-run.
+
+    A 10k-step run writing ~1GB every 1000 steps needs ~10GB. The CAMELS corpus already occupies
+    ~47GB of a 60GB network volume, so this fills up around step 8000 -- i.e. it fails LATE, after
+    hours of GPU time, which is the exact failure the periodic saves exist to prevent.
+    """
+    if not (args.save and args.save_every > 0):
+        return
+    est_gb = n_online * 4 / 1e9                      # fp32 full state dict, model only
+    n_files = args.steps // args.save_every + 1      # mid-run files + the final --save
+    need = est_gb * n_files
+    free = shutil.disk_usage(os.path.dirname(os.path.abspath(args.save))).free / 1e9
+    rprint(f"[disk] {n_files} checkpoints x ~{est_gb:.2f}GB = ~{need:.1f}GB needed | {free:.1f}GB free")
+    if need > free * 0.9:
+        rprint(f"[disk] ⚠ WARNING: may run out of space mid-run. Raise --save-every "
+               f"(fewer files), free space, or expect an ENOSPC failure around step "
+               f"{int(args.save_every * (free * 0.9 / est_gb)):d}.")
+
+
+def collapsed(core, args, device) -> bool:
+    """True once the representation has demonstrably collapsed -- decided IDENTICALLY on all ranks.
+
+    Grad-clipping + cosine decay make late training monotone: once it tips into the collapse
+    basin it does NOT come back (measured -- see study/notes/collapse_resolution.md), so an
+    unattended long run that collapses at step 3k would burn the remaining hours for nothing.
+
+    tgt_std and eff_rank are LOCAL per-rank statistics and can straddle the threshold differently
+    on each rank. Deciding independently would let one rank exit while the others block forever in
+    a collective -> hang. So all-reduce the vote (MAX = any rank tripping stops everyone).
+    """
+    tripped = (core.last_tgt_std < args.collapse_std or
+               core.last_eff_rank < args.collapse_rank)
+    vote = torch.tensor([1.0 if tripped else 0.0], device=device)
+    dist.all_reduce(vote, op=dist.ReduceOp.MAX)
+    return vote.item() > 0
+
+
+def step_path(base: str, step: int) -> str:
+    """`/workspace/ckpt_10k.pt` + step 2000 -> `/workspace/ckpt_10k_step2000.pt`."""
+    root, ext = os.path.splitext(base)
+    return f"{root}_step{step}{ext or '.pt'}"
+
+
 def online_param_count(model):
     """
     Calculates the total number of trainable parameters in the active model.
@@ -388,6 +433,15 @@ def main():
     # LR schedule: linear warmup -> cosine decay to lr*lr_min_ratio. A flat LR with no warmup
     # lets early updates slam the shared encoder into collapse before the representation forms;
     # the cosine tail keeps late training from jittering back into the collapse basin.
+    # warmup_steps < 0 => auto = 2% of the run, floored at 20. Warmup must scale WITH the run:
+    # a fixed 20 is 2% of a 1000-step run but 0.2% of a 10k one. (Auto reproduces the validated
+    # 1000-step and 300-step gate configs exactly, since 2% of 1000 = 20 = the old default.)
+    if args.warmup_steps < 0:
+        args.warmup_steps = max(20, int(0.02 * args.steps))
+    rprint(f"[sched] lr {args.lr:.2e} | warmup {args.warmup_steps} | cosine -> "
+           f"{args.lr * args.lr_min_ratio:.2e} over {args.steps} steps")
+    check_disk(args, n_online)
+
     def lr_at(step):
         if step < args.warmup_steps:
             return (step + 1) / max(1, args.warmup_steps)
@@ -408,6 +462,7 @@ def main():
     warmup = min(10, args.steps // 2)
     torch.cuda.reset_peak_memory_stats(device)
     t0 = None
+    stopped_at = None                     # set by the collapse guard; None = ran to completion
     for step in range(args.steps):
         if step == warmup:
             torch.cuda.synchronize()
@@ -443,25 +498,58 @@ def main():
                          f"tgt_std {j.last_tgt_std:.4f} eff_rank {j.last_eff_rank:.1f}")
             rprint(f"step {step:>4} loss {loss.item():.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
+        # Periodic checkpoints: insurance against a long run dying, AND the raw material for an
+        # R^2-vs-pretraining-steps curve (probe each one) instead of a single end-of-run point.
+        # All ranks must enter save_checkpoint -- it is a collective under FSDP.
+        if args.save and args.save_every > 0 and step > 0 and step % args.save_every == 0:
+            save_checkpoint(model, args, step_path(args.save, step))
+
+        # Collapse guard: stop early rather than burn hours in the collapse basin (no recovery).
+        # The skip window is its OWN knob, deliberately not the LR warmup: eff_rank legitimately
+        # STARTS at ~1.8-2 and climbs out over a few hundred steps (measured: 1.8 -> 28.5 by step
+        # 300), so a guard armed at LR-warmup (step 20 on a 300-step gate) would abort every
+        # healthy run at minute one. Arm it only after rank has had time to climb.
+        if (lejepa and args.collapse_abort and step % args.log_every == 0
+                and step >= args.collapse_after):
+            core = model.module if hasattr(model, "module") else model
+            if collapsed(core.jepa, args, device):
+                rprint(f"[abort] collapse detected at step {step} "
+                       f"(tgt_std < {args.collapse_std} or eff_rank < {args.collapse_rank}); "
+                       f"stopping. Most recent --save-every file is the last good checkpoint.")
+                stopped_at = step
+                break
+
     torch.cuda.synchronize()
-    elapsed = time.time() - t0
-    n_steps = args.steps - warmup
-    sps = (n_steps * args.batch * world) / elapsed
-    step_time = elapsed / n_steps
-    peak_mem = torch.cuda.max_memory_allocated(device) / 1e9
-    mfu = estimate_mfu(args, n_online, step_time)
+    # A collapse abort before `warmup` leaves t0 unset (timing never started) and n_steps <= 0.
+    # Report nothing rather than divide by zero on top of an already-failed run.
+    n_steps = (stopped_at if stopped_at is not None else args.steps) - warmup
+    if t0 is None or n_steps <= 0:
+        rprint(f"[perf] no timed window (stopped at step {stopped_at}) -- skipping throughput report")
+    else:
+        elapsed = time.time() - t0
+        sps = (n_steps * args.batch * world) / elapsed
+        step_time = elapsed / n_steps
+        peak_mem = torch.cuda.max_memory_allocated(device) / 1e9
+        mfu = estimate_mfu(args, n_online, step_time)
 
-    rprint("\n=== RESULT ===========================================")
-    rprint(f" mode={args.mode} bf16={args.bf16} ckpt={args.ckpt} "
-           f"world={world} online_params={n_online/1e6:.1f}M")
-    rprint(f" samples/sec (global) : {sps:8.1f}")
-    rprint(f" sec/step (per rank)  : {step_time*1e3:8.1f} ms")
-    rprint(f" peak mem / gpu       : {peak_mem:8.2f} GB")
-    rprint(f" MFU (approx)         : {mfu*100:8.2f} %")
-    rprint("======================================================")
+        rprint("\n=== RESULT ===========================================")
+        rprint(f" mode={args.mode} bf16={args.bf16} ckpt={args.ckpt} "
+               f"world={world} online_params={n_online/1e6:.1f}M")
+        rprint(f" samples/sec (global) : {sps:8.1f}")
+        rprint(f" sec/step (per rank)  : {step_time*1e3:8.1f} ms")
+        rprint(f" peak mem / gpu       : {peak_mem:8.2f} GB")
+        rprint(f" MFU (approx)         : {mfu*100:8.2f} %")
+        rprint("======================================================")
 
-    if args.save:
+    # Only write the headline --save path on a run that finished healthy. After a collapse abort
+    # these weights ARE the collapsed model: saving them here would silently overwrite a good
+    # prior checkpoint at the same path (e.g. a rerun reusing --save ckpt.pt destroying the
+    # validated keeper). The step-tagged --save-every files remain as the last good state.
+    if args.save and stopped_at is None:
         save_checkpoint(model, args, args.save)   # FSDP gathers to rank0 (barrier); all ranks call
+    elif args.save:
+        rprint(f"[ckpt] NOT writing {args.save} -- run aborted at step {stopped_at} (collapsed). "
+               f"Prior checkpoint at that path is left intact.")
     cleanup()
 
 
@@ -488,6 +576,19 @@ def parse_args():
                    help="disable exact periodic symmetry augmentation (roll/rot90/flip) on the "
                         "SSL corpus; augmentation is ON by default and helps feature rank")
     p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--save-every", type=int, default=0,
+                   help="also checkpoint every N steps as <save>_step<N>.pt (0 = only at the end). "
+                        "Insurance on long runs, and gives an R^2-vs-steps curve when probed.")
+    p.add_argument("--collapse-abort", action="store_true",
+                   help="stop early if the representation collapses (it does not recover)")
+    p.add_argument("--collapse-after", type=int, default=500,
+                   help="arm --collapse-abort only after this step; eff_rank legitimately starts "
+                        "at ~2 and climbs (1.8 -> 28.5 by step 300), so arming early aborts "
+                        "healthy runs. Must exceed the rank climb-out for YOUR config.")
+    p.add_argument("--collapse-std", type=float, default=0.1,
+                   help="--collapse-abort trips below this tgt_std (healthy ~0.9)")
+    p.add_argument("--collapse-rank", type=float, default=4.0,
+                   help="--collapse-abort trips below this eff_rank (healthy ~38)")
     p.add_argument("--save", type=str, default="",
                    help="path to save a gathered FULL_STATE_DICT checkpoint (empty = skip)")
     p.add_argument("--bf16", action="store_true")
@@ -508,7 +609,8 @@ def parse_args():
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--log-every", type=int, default=20, help="print step metrics every N steps")
     p.add_argument("--lr", type=float, default=1.5e-4)
-    p.add_argument("--warmup-steps", type=int, default=20, help="linear LR warmup steps")
+    p.add_argument("--warmup-steps", type=int, default=-1,
+                   help="linear LR warmup steps (-1 = auto: 2%% of --steps, floored at 20)")
     p.add_argument("--lr-min-ratio", type=float, default=0.1,
                    help="cosine decay floor as a fraction of peak LR")
     p.add_argument("--grad-clip", type=float, default=1.0, help="max grad norm (0 = off)")

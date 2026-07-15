@@ -49,12 +49,19 @@ def effective_rank(C: torch.Tensor) -> float:
 
 @torch.no_grad()
 def extract(encoder, loader, device, d):
-    """One pass: stream token covariance (d x d), keep pooled vectors + labels (N is small)."""
+    """One pass: stream token + within-image covariance (d x d each), keep pooled vectors."""
     # Token stats stream in float64 -- B*n tokens never fits in memory, but the (d,d) outer-product
     # accumulator does. C = E[zz^T] - mu mu^T at the end.
     sum_z = torch.zeros(d, dtype=torch.float64, device=device)
     sum_zz = torch.zeros(d, d, dtype=torch.float64, device=device)
     n_tokens = 0
+
+    # Within-image covariance: deviations of each token from ITS OWN image's mean, pooled over
+    # images. By the law of total covariance, C_token = C_between + C_within exactly, where
+    # C_between = cov of the pooled per-image vectors. Isolating C_within explains whether an
+    # equal token/pooled participation ratio means "no within-image variation" (spatial collapse)
+    # or "within-image variation shares the between-image subspace" (a real, benign structure).
+    sum_ww = torch.zeros(d, d, dtype=torch.float64, device=device)
 
     pooled, labels = [], []
     for x, y in loader:
@@ -68,12 +75,33 @@ def extract(encoder, loader, device, d):
         sum_zz += z.t() @ z
         n_tokens += z.size(0)
 
-        pooled.append(tokens.mean(dim=1).cpu())       # (B, d) -- the probe-facing view
+        img_mean = tokens.mean(dim=1, keepdim=True)             # (B, 1, d) -- the probe's view
+        w = (tokens - img_mean).reshape(-1, d).double()         # within-image deviations
+        sum_ww += w.t() @ w
+
+        pooled.append(img_mean.squeeze(1).cpu())      # (B, d) -- the probe-facing view
         labels.append(y[:, :2].clone())               # cols 0,1 = Omega_m, sigma_8
 
     mu = sum_z / n_tokens
     token_cov = sum_zz / n_tokens - torch.outer(mu, mu)
-    return token_cov, torch.cat(pooled), torch.cat(labels)
+    within_cov = sum_ww / n_tokens
+    # Back to CPU: pooled/labels are already CPU, and the downstream eigh/svd/ridge all run there.
+    # (Mixing a CUDA within_cov with a CPU pooled_cov in subspace_alignment is a device-mismatch
+    # crash that a CPU-only dev box never reproduces.)
+    return token_cov.cpu(), within_cov.cpu(), torch.cat(pooled), torch.cat(labels)
+
+
+def subspace_alignment(A: torch.Tensor, B: torch.Tensor, k: int = 10) -> float:
+    """Mean squared cosine of the principal angles between the top-k eigenspaces of A and B.
+
+    1.0 = the two covariances' dominant subspaces coincide; ~k/d = unrelated. Distinguishes
+    "within-image variation is proportional to between-image variation" (aligned -> equal
+    participation ratios) from a coincidence.
+    """
+    _, VA = torch.linalg.eigh(A)
+    _, VB = torch.linalg.eigh(B)
+    QA, QB = VA[:, -k:], VB[:, -k:]          # eigh returns ASCENDING eigenvalues -> take the tail
+    return ((QA.t() @ QB) ** 2).sum().item() / k
 
 
 def ridge_r2(pcs, y, tr_idx, te_idx, ks, alpha=1e-2):
@@ -123,7 +151,7 @@ def main():
     loader = DataLoader(Subset(ds, range(n)), batch_size=args.batch, shuffle=False,
                         num_workers=args.workers, pin_memory=True)
 
-    token_cov, pooled, y = extract(encoder, loader, device, ENC["d"])
+    token_cov, within_cov, pooled, y = extract(encoder, loader, device, ENC["d"])
     print(f"[rank] embedded {n} maps -> pooled {tuple(pooled.shape)}")
 
     # ---- 1 & 2: the comparison this script exists for.
@@ -140,6 +168,27 @@ def main():
         print("     More steps raise token rank the probe never consumes. Regularize the POOLED rep.")
     else:
         print("  -> pooled rank tracks token rank: pooling is not throwing the geometry away.")
+
+    # ---- 2b: WHY they match. C_token = C_between + C_within (law of total covariance), and the
+    # participation ratio is scale-invariant -- so equal ranks mean either C_within ~ 0 (every
+    # patch of an image maps to the same vector = spatial collapse) or C_within is proportional
+    # to C_between (same subspace, different scale = benign, and physically sensible if patches
+    # vary within an image along the same feature axes that cosmology varies between images).
+    r = (torch.diagonal(within_cov).sum() / torch.diagonal(pooled_cov).sum()).item()
+    align = subspace_alignment(within_cov, pooled_cov, k=10)
+    print("\n=== within-image vs between-image variance ===")
+    print(f"  within/between total variance ratio : {r:8.3f}")
+    print(f"  within eff_rank                     : {effective_rank(within_cov):8.2f}")
+    print(f"  top-10 subspace alignment [0..1]    : {align:8.3f}")
+    if r < 0.05:
+        print("  -> within-image variance is ~0: every patch embeds to its image's vector.")
+        print("     SPATIAL COLLAPSE -- the encoder is ignoring position; masked prediction is trivial.")
+    elif align > 0.5:
+        print("  -> within- and between-image variation share a subspace (hence equal ranks).")
+        print("     Benign: patches vary along the same feature axes that cosmology varies along.")
+    else:
+        print("  -> substantial within-image variance in a DIFFERENT subspace; equal ranks are then")
+        print("     a coincidence of the participation ratio -- treat the pooled verdict with care.")
 
     # ---- 3: how many pooled dims carry variance at all.
     _, S, V = torch.linalg.svd(Z, full_matrices=False)

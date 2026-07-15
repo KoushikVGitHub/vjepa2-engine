@@ -123,7 +123,10 @@ calibration term tightens with training. Nothing plateaued → undertrained, not
 
 Baselines, honestly: supervised CMD `o3_err` CNN gets physical RMSE Ω_m 0.025 / σ8 0.045 (we're
 ~3× off, expected for a frozen label-free probe lacking the supervised CNN's circular-padding and
-8× rot/flip inductive biases); the published VAE linear probe gets R² 0.93 (trained far longer).
+8× rot/flip inductive biases). The published VAE linear probe reports R² 0.93 — but that is **not
+a like-for-like comparison**: it uses **3-channel input (Mgas + HI + B)** against our **single
+field**, so much of that gap is *information supplied*, not training or method. A fair contest
+needs our probe on multi-channel input; until then, cite it as context, not as a target we lost to.
 
 ## 6. Two lessons worth carrying
 
@@ -144,19 +147,58 @@ down* (it's in the denominator of the participation ratio), so 38 is achieved **
 which makes `cov_coef` safe headroom to raise later (var 5.0 pins the scale, so there's no
 shrink risk) if the probe wants more. Not needed yet.
 
-## 7. Open: is the *pooled* rank the real ceiling?
+## 7. Measured: cosmology is spread over ~32 dims, and the probe head is not the limit
 
-`eff_rank` is measured on `full_flat` — every patch token of every image, flattened. **The probe
-never sees that cloud**: it pools each image's tokens into one vector per map. CAMELS fields are
-spatially smooth, so intra-image tokens are highly redundant — the token cloud can carry rank 38
-while the **pooled per-image vectors that actually feed the probe** carry far less. That number
-has never been measured.
+`scripts/rank_report.py` on the 1000-step checkpoint (Mgas, 3000 maps), held-out R² from a
+closed-form ridge on the top-k principal components at a **sim-level** split:
 
-This matters before spending ~7 h on a 10k-step keeper: if pooled rank is the binding constraint,
-more steps raise a token-level rank the probe never consumes, and the fix is to regularize the
-**pooled** representation — a code change, not compute.
+| k (PCs) | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|---|---|
+| Ω_m | 0.090 | 0.122 | 0.139 | 0.322 | 0.394 | **0.513** | 0.532 | 0.548 |
+| σ8 | 0.048 | 0.056 | 0.056 | 0.074 | 0.092 | 0.154 | 0.203 | 0.246 |
 
-[`../../scripts/rank_report.py`](../../scripts/rank_report.py) settles it on a frozen checkpoint
-with no training: token rank vs pooled rank, the pooled PCA spectrum, and a closed-form ridge
-probe on the top-k PCs (sim-level split) to show how many dims carry *cosmology* rather than
-nuisance variance.
+Two conclusions, both load-bearing:
+
+1. **R² does not saturate at small k.** It climbs steeply from k=8 to k=32. Cosmology is
+   *distributed* across ~32 dimensions, not concentrated in 2. This **kills the "eff_rank ≈ 2 was
+   matched to the 2 recoverable DoF" hypothesis** for good — had that been true, R² would have
+   flattened by k=2 and every dimension past it would be nuisance. The rank recovered by the
+   collapse fix is *signal*, which is why the probe moved 0.23 → 0.50.
+2. **The probe head adds nothing over a linear readout.** Ridge on 32 PCs = **0.513**, versus the
+   *trained attentive-pool MLP* at **0.50**. When a closed-form linear fit matches your trained
+   head, the head is not the bottleneck — the features are. So ~0.55 is approximately the
+   **linear-decodable ceiling of this checkpoint**, and only better features move it.
+
+The pooled PCA spectrum is flat (top-10 explained variance 0.061 … 0.031; 49 dims for 90% of
+variance, 143 for 99%) — no dominant direction, consistent with eff_rank 38 as a soft count.
+
+Together: pooling is not the bottleneck, the probe is not the bottleneck, and rank is real signal
+still climbing at step 1000 → **more pretraining steps is the justified lever.**
+
+## 8. Open: why do token and pooled rank match *exactly*?
+
+Token rank 38.04 and pooled rank 38.04 agreed to four significant figures. Two genuinely
+different covariance matrices (768k tokens vs 3000 pooled vectors) do not agree that closely by
+luck. By the law of total covariance `C_token = C_between + C_within`, and the participation
+ratio is scale-invariant, so equality implies either `C_within ≈ 0` (every patch of an image
+embeds to the same vector — spatial collapse; argued against by `pred` = 0.256, since identical
+patches would make masked prediction trivial) or `C_within ∝ C_between` (same subspace, different
+scale — benign, and physically sensible if patches vary *within* an image along the same feature
+axes that cosmology varies *between* images). `rank_report.py` now measures the within/between
+variance ratio and the top-10 subspace alignment to decide which.
+
+## 9. Answered: pooling is not the ceiling
+
+`eff_rank` is measured on `full_flat` — every patch token of every image. **The probe never sees
+that cloud**: it pools each image to one vector. CAMELS fields are spatially smooth, so intra-image
+tokens are redundant, and the token cloud could plausibly carry rank 38 while the pooled vectors
+the probe consumes carried far less. Had that been true, a 10k-step run would have raised a rank
+the probe never touches, and the fix would have been a code change (regularize the *pooled*
+representation), not compute.
+
+Measured: **pooled rank 38.04 vs token rank 38.04.** Pooling discards nothing. The token rank the
+trainer logs *is* the rank the probe gets — so the metric we've been optimizing is the right one,
+and more steps is the correct spend. (The suspiciously exact agreement is §8.)
+
+That token rank 38.04 also reproduces the training log's 38.7 on an independently-written
+measurement — a useful check that the headline number isn't an artifact of the training loop.
