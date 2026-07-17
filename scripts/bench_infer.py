@@ -146,9 +146,15 @@ def make_runner(lever, enc, device):
         return runner, True
 
     if lever == "int8":
-        # Dynamic int8 quantization acts on nn.Linear weights directly.
-        # It executes primarily on the CPU.
+        # Dynamic int8 quantization acts on nn.Linear weights directly. Runs on CPU.
         qenc = torch.ao.quantization.quantize_dynamic(enc, {nn.Linear}, dtype=torch.qint8)
+        # A quantized nn.Linear exposes .weight as a METHOD, but nn.TransformerEncoder's fused
+        # fast path reads linear1.weight.device assuming a tensor -> crashes. Disable that fast
+        # path for this lever (the bf16 levers get this for free via autocast).
+        try:
+            torch.backends.mha.set_fastpath_enabled(False)
+        except AttributeError:
+            qenc.train()  # dropout=0 here, so train==eval numerically; train mode skips the fast path
         def runner(x):
             # No autocast here - dynamic int8 handles its own internal fp32/int8 casting.
             return pool(qenc(x))
