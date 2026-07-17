@@ -109,8 +109,12 @@ ViT-L (img256/patch16/d1024/heads16/L24, 256 tokens), batch 64, 1× A40, forward
   148 img/s at 10.5% MFU (GPU underfed); b256 = 318 img/s (throughput-optimal) at 805 ms latency
   (offline batch only). Peak mem barely moves (0.83 → 0.89 GB) — activations are cheap at 256 tokens,
   so batch is a free throughput knob until the kernels saturate.
-- † **b8 is a measurement artifact, not a real point.** 68 img/s is below even b1 and 2× off the
-  per-image trend. This run was launched WITHOUT `CUDA_VISIBLE_DEVICES=0`, so a co-tenant on the
-  default GPU likely perturbed exactly this ~1 s window (tight p50/p99 is consistent with sustained
-  interference). Re-run isolated: `CUDA_VISIBLE_DEVICES=0 ... --batch 8 --warmup 20` → expect
-  ~250–290 img/s on the b1→b64 curve. [pending re-run]
+- † **b8 is a REPRODUCIBLE per-shape slowdown, not noise.** Isolated re-run
+  (`CUDA_VISIBLE_DEVICES=0 ... --batch 8 --warmup 20`) reproduced it to the digit (117.4 ms,
+  68.1 img/s, MFU 4.8%), so the initial co-tenant-interference guess was wrong. b8 runs ~2× slower
+  per image than b1 and ~4.5× slower than the b64/b256 regime, and the kernel is stable (p50/p99
+  within 0.4 ms — not recompilation thrash). Most likely an **Inductor kernel-selection cliff** for
+  this shape: `max-autotune` GEMM is disabled ("not enough SMs"), so `torch.compile` falls back to a
+  default tile-size heuristic that picks a poor config at M = 8·256 = 2048 while M ∈ {256, 16384,
+  65536} land well. Discriminator: run `--lever bf16 --batch-sweep 1,8,64,256` (no compile); if b8 is
+  on-trend there, the cliff is compile/Inductor, not hardware GEMM tiling. [discriminator pending]
