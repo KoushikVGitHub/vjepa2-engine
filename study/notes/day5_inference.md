@@ -55,12 +55,41 @@ The point is to calibrate intuition, not to be right — write the number and th
 
 ## Results
 
-_(run the benchmark, paste the markdown table it prints here, then write the observations —
-lever-by-lever, in the Day-4 style: what moved, by how much, and the mechanism.)_
+ViT-L (img256/patch16/d1024/heads16/L24, 256 tokens), batch 64, 1× A40, forward-only,
+50 iters / 20 warmup. `torch.compile(mode="max-autotune")` fell back to default GEMMs
+("not enough SMs" — Triton max-autotune templates didn't engage on this GPU).
 
-| lever | dtype | compile | latency p50 (ms) | latency p99 (ms) | images/sec | peak mem (GB) | MFU (%) | cosine drift |
-|-------|-------|---------|------------------|------------------|-----------|---------------|---------|--------------|
-| _tbd_ |       |         |                  |                  |           |               |         |              |
+| lever         | latency p50 (ms) | latency p99 (ms) | images/sec | peak mem (GB) | MFU (%) | cosine drift |
+|---------------|------------------|------------------|-----------|---------------|---------|--------------|
+| baseline      | 991.87           | 1039.26          | 64.4      | 1.32          | 4.6     | –            |
+| bf16          | 262.49           | 264.54           | 244.0     | 1.19          | 17.3    | 1.87e-05     |
+| bf16+flash    | 264.75           | 265.95           | 241.9     | 1.19          | 17.1    | 1.87e-05     |
+| bf16+compile  | 213.20           | 215.17           | 300.5     | 0.84          | 21.3    | –            |
+| int8 (CPU)    | 25801.49         | 28569.67         | 2.5       | n/a           | 0.2     | 3.39e-05     |
 
 ### Observations
-- _tbd_
+- **bf16 is the dominant lever (P2).** 64 → 244 img/s = **3.8×** over the fp32 baseline, MFU
+  4.6 → 17.3%, for a cosine drift of 1.87e-5 (five digits preserved — effectively free). Tensor
+  cores replacing CUDA-core fp32 matmuls, same mechanism as the Day-4 training sweep (3.4× there).
+- **Flash is a no-op at 256 tokens (P3 — predicted).** bf16+flash = 242 img/s vs bf16's 244, drift
+  identical to the digit. autocast already disables `nn.TransformerEncoderLayer`'s fused C++ path and
+  routes to `F.scaled_dot_product_attention`, where PyTorch auto-selects a fused backend anyway —
+  so *forcing* FLASH changes nothing. Flash's win scales with sequence length; 256 tokens is too
+  short for it to matter.
+- **compile stacks on bf16 (P4).** 244 → 300 img/s = **+23%** (4.7× over baseline total), MFU 21.3%,
+  and peak mem 1.19 → 0.84 GB — graph fusion removes intermediate activation allocations. And this is
+  the *un-tuned* number: `max-autotune` GEMM never engaged ("not enough SMs"), so there's likely more
+  on the table with CUDA graphs / a GPU where the Triton templates fire.
+- **int8 dynamic PTQ is a CPU tool, not a GPU-latency lever (P5b).** 26 s/batch, ~120× slower than
+  bf16-GPU — because `quantize_dynamic` executes on CPU. Its cosine drift (3.4e-5) is tiny, so the
+  *accuracy* cost is negligible; the point is that the speed story only exists for CPU deployment.
+  GPU int8 would need static quant / TensorRT hitting the int8 tensor cores.
+- **MFU ceiling ~21%, *below* training's 26% (Day 4).** Counterintuitive but instructive: forward-only
+  inference has 3× lower arithmetic intensity than the training step (`2·N·tokens` vs `6·N·tokens`),
+  so kernels are shorter and more launch/memory-bound — less compute to amortize dispatch over. The
+  remaining headroom is throughput-side: **larger batch** (amortize launches) and **CUDA graphs /
+  working max-autotune**, not precision. → run the batch sweep (P5a) to find where MFU saturates.
+
+### Open: P5a batching sweep
+`python scripts/bench_infer.py --lever bf16+compile --batch-sweep 1,8,64,256`
+(expect MFU to climb with batch as kernels get more work; p99 latency to rise once throughput-bound.)
