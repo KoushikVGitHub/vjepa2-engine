@@ -15,7 +15,7 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 | **1 · Curation at scale** | `src/data/fields.py`, `src/data/curation.py` | Offline, manifest-driven curation with disk-cached stats (skip the full re-scan on reruns); standardization computed in one pass. Profiled throughput and found the bottleneck *moves* under parallelism. | ✅ built + profiled |
 | **2 · The method (from scratch)** | `src/jepa_loss.py`, `src/sigreg.py` | Minimal JEPA (masking, predictor) with two anti-collapse paths: EMA + stop-grad, and **LeJEPA / SIGReg** (push embeddings toward an isotropic Gaussian — no EMA/stop-grad heuristics). Distributed SIGReg all-reduce **verified** (world=2 ≡ world=1). Effective-rank monitoring to catch dimensional collapse. | ✅ built + verified |
 | **3 · Distributed training** | `src/train_fsdp.py` | Wrap the JEPA loop in **PyTorch FSDP/DDP**, bf16 mixed precision, activation checkpointing; LR warmup + cosine + grad-clip for stable LeJEPA. Throughput + memory + MFU logged per lever. | ✅ built + benchmarked |
-| **4 · Inference optimization** | `src/infer.py` | Baseline encoder inference → `torch.compile`, bf16/fp16, batching, optional int8 PTQ. Latency (p50/p99) + throughput benchmark, lever-by-lever. | 🔜 next |
+| **4 · Inference optimization** | `scripts/bench_infer.py` | Baseline encoder inference → bf16, FlashAttention, `torch.compile`, int8 PTQ, batch sweep. Latency (p50/p99) + throughput + MFU, lever-by-lever. **bf16 = 3.8×, +compile 4.7× total; MFU ceiling ~22%.** | ✅ |
 
 ## Current application — Stage 1: CAMELS cosmology fields
 
@@ -124,7 +124,7 @@ python scripts/rank_report.py --ckpt /workspace/ckpt.pt --field Mgas --n 3000
 - [x] **Cosmology probe (in-suite, Mgas, 1000-step ckpt):** **Ω_m R² = 0.50**, σ8 = 0.31 — a **2.2× lift** from the rank fix. Label-free pretraining learns cosmology; ~3× off the supervised CNN.
 - [ ] **Pooled-rank diagnostic + 10k-step keeper:** does token rank 38 survive per-image pooling, and does scaling steps lift R² further.
 - [ ] **ViT-L FSDP sweep:** 4-row ddp/fsdp/fsdp+bf16/fsdp+bf16+ckpt at ViT-L scale (where sharding starts to pay vs the FSDP-neutral ViT-B).
-- [ ] **Inference optimization (Stage 4):** latency p50/p99 + throughput per lever.
+- [x] **Inference optimization (Stage 4):** latency p50/p99 + throughput + MFU per lever (`study/notes/day5_inference.md`).
 
 ## Roadmap
 The engine is dataset-agnostic, so each stage swaps only the loader + input dims:
@@ -133,6 +133,6 @@ The engine is dataset-agnostic, so each stage swaps only the loader + input dims
 3. **Stage 3 — SDOML solar observations.** NASA Solar Dynamics Observatory ML dataset — real *observed* multi-waveband video at scale; forecast-next-frame = world dynamics.
 
 ## Status
-Active engineering build. Not affiliated with Meta or AMI Labs. Demonstrates production-engineering skills for self-supervised world-models: large-scale data curation, distributed training with principled anti-collapse, and (next) inference optimization.
+Active engineering build. Not affiliated with Meta or AMI Labs. Demonstrates production-engineering skills for self-supervised world-models: large-scale data curation, distributed training with principled anti-collapse, and inference optimization.
 
 — [github.com/KoushikVGitHub/vjepa2-engine](https://github.com/KoushikVGitHub/vjepa2-engine)

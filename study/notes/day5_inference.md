@@ -90,6 +90,27 @@ ViT-L (img256/patch16/d1024/heads16/L24, 256 tokens), batch 64, 1× A40, forward
   remaining headroom is throughput-side: **larger batch** (amortize launches) and **CUDA graphs /
   working max-autotune**, not precision. → run the batch sweep (P5a) to find where MFU saturates.
 
-### Open: P5a batching sweep
+### P5a batching sweep (bf16+compile)
+
 `python scripts/bench_infer.py --lever bf16+compile --batch-sweep 1,8,64,256`
-(expect MFU to climb with batch as kernels get more work; p99 latency to rise once throughput-bound.)
+
+| batch | latency p50 (ms) | latency p99 (ms) | images/sec | peak mem (GB) | MFU (%) |
+|-------|------------------|------------------|-----------|---------------|---------|
+| 1     | 6.73             | 6.86             | 148.3     | 0.83          | 10.5    |
+| 8     | 117.57           | 118.05           | 68.0      | 0.83          | 4.8 †   |
+| 64    | 208.60           | 210.73           | 307.1     | 0.84          | 21.8    |
+| 256   | 805.01           | 825.66           | 318.2     | 0.89          | 22.5    |
+
+- **Throughput saturates by batch 64.** b64 → b256 quadruples batch and latency (209 → 805 ms) for
+  +3.6% throughput (307 → 318 img/s); MFU flatlines at ~22%. The binding constraint is NOT batch
+  size — it's kernel efficiency (`max-autotune` GEMM never engaged; launch-bound). To push past ~22%
+  the lever is CUDA graphs / working max-autotune, not more batch.
+- **Latency vs throughput tradeoff, measured.** b1 = 6.7 ms latency (real-time/interactive) but only
+  148 img/s at 10.5% MFU (GPU underfed); b256 = 318 img/s (throughput-optimal) at 805 ms latency
+  (offline batch only). Peak mem barely moves (0.83 → 0.89 GB) — activations are cheap at 256 tokens,
+  so batch is a free throughput knob until the kernels saturate.
+- † **b8 is a measurement artifact, not a real point.** 68 img/s is below even b1 and 2× off the
+  per-image trend. This run was launched WITHOUT `CUDA_VISIBLE_DEVICES=0`, so a co-tenant on the
+  default GPU likely perturbed exactly this ~1 s window (tight p50/p99 is consistent with sustained
+  interference). Re-run isolated: `CUDA_VISIBLE_DEVICES=0 ... --batch 8 --warmup 20` → expect
+  ~250–290 img/s on the b1→b64 curve. [pending re-run]
