@@ -107,14 +107,19 @@ class JEPAStep(nn.Module):
         loops can easily digest.
     """
 
-    def __init__(self, jepa: JEPA, grid: int, block: int, n_blocks: int = 1):
+    def __init__(self, jepa: JEPA, grid: int, block: int, n_blocks: int = 1, paradigm: str = "masked"):
         super().__init__()
         self.jepa = jepa
         self.grid = grid
         self.block = block
         self.n_blocks = n_blocks
+        self.paradigm = paradigm            # "masked" (I-JEPA) | "multicrop" (DINO/VICReg invariance)
 
     def forward(self, x, sigreg_generator=None, sigreg_distributed=False):
+        if self.paradigm == "multicrop":
+            # x is (B, C, 1, H, W) crops -> augmentation-invariance forward, no mask, no predictor.
+            loss, _ = self.jepa.forward_multicrop(x)
+            return loss
         ctx_idx, tgt_idx = random_block_mask(self.grid, self.block, x.device, self.n_blocks)
         # sigreg_* thread down to _forward_lejepa (ignored in ema mode).
         loss, _ = self.jepa(x, ctx_idx, tgt_idx,
@@ -147,14 +152,18 @@ def build_model(args, device):
     enc = ViTEncoder(img=args.img, patch=args.patch, d=args.d,
                       heads=args.heads, layers=args.layers)
     grid = args.img // args.patch
-    pred = ViTPredictor(grid * grid, d=args.d, pred_d=args.pred_d,
-                        heads=args.pred_heads, layers=args.pred_layers)
+    # multicrop uses NO predictor -> don't build/FSDP-wrap dead params (unused submodule under
+    # FULL_SHARD can stall the backward reduce-scatter). The masked paths need it.
+    pred = None if args.paradigm == "multicrop" else ViTPredictor(
+        grid * grid, d=args.d, pred_d=args.pred_d, heads=args.pred_heads, layers=args.pred_layers)
     jepa = JEPA(enc, pred, ema_decay=0.998, stop_grad=True,
                 loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda,
                 var_coef=args.var_coef, cov_coef=args.cov_coef,
                 target_norm=args.target_norm,
-                visreg_lambda=args.visreg_lambda, visreg_proj_dim=args.visreg_proj_dim)
-    return JEPAStep(jepa, grid, block=args.block, n_blocks=args.n_blocks).to(device)
+                visreg_lambda=args.visreg_lambda, visreg_proj_dim=args.visreg_proj_dim,
+                n_global=args.n_global)
+    return JEPAStep(jepa, grid, block=args.block, n_blocks=args.n_blocks,
+                    paradigm=args.paradigm).to(device)
 
 
 def wrap_fsdp(model, args, device):
@@ -317,6 +326,11 @@ def estimate_mfu(args, n_online, step_time):
     """
 
     grid = args.img // args.patch
+    if args.paradigm == "multicrop":
+        # C crops each fully encoded (one 6N forward per crop), no predictor/teacher.
+        n_crops = args.n_global + args.n_local
+        flops_step = 6 * n_online * (args.batch * n_crops * grid * grid)
+        return (flops_step / step_time) / (args.peak_tflops * 1e12)
     tokens = args.batch * grid * grid
     if LOSS_MODES[args.loss]["needs_teacher"]:
         # ema: one online forward + a cheaper frozen (half-size) teacher forward.
@@ -364,6 +378,23 @@ def build_dataloader(args, world, rank):
         so that per-rank batches remain perfectly EQUAL, allowing the SIGReg loss to 
         safely rely on an exact global count of N = batch * world.
     """
+    # Multi-crop augmentation-invariance corpus (VISReg's native paradigm): returns (C,1,H,W) crops
+    # per image. Natural images only -- multi-crop RandomResizedCrop is not obviously label-preserving
+    # for cosmology fields (changes physical field-of-view / large-scale power). Returns early.
+    if args.paradigm == "multicrop":
+        if args.dataset == "camels":
+            raise ValueError("--paradigm multicrop needs --dataset stl10|cifar10 (augmentation "
+                             "validity for cosmology fields is unresolved).")
+        from data.multicrop import MultiCropDataset
+        ds = MultiCropDataset(args.data_root, name=args.dataset, img=args.img,
+                              n_global=args.n_global, n_local=args.n_local)
+        rprint(f"[data] multicrop {args.dataset}: {len(ds)} images x "
+               f"{args.n_global + args.n_local} crops @ {args.img}x{args.img}")
+        sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True, drop_last=True)
+        loader = DataLoader(ds, batch_size=args.batch, sampler=sampler,
+                            num_workers=args.workers, pin_memory=True, drop_last=True)
+        return loader, sampler
+
     # Natural-image VALIDATION corpus (stl10/cifar10): confirms the anti-collapse behavior on rich
     # data (what VISReg was designed for), isolating the CAMELS collapse as a smooth-field property.
     # Grayscale -> same 1-channel ViTEncoder; SSL only (no params/probe). Returns early.
@@ -602,6 +633,12 @@ def parse_args():
                    help="camels = CAMELS multifield maps (default); stl10/cifar10 = natural-image "
                         "validation corpus (grayscale, torchvision auto-download) to confirm the "
                         "anti-collapse behavior on rich data vs. smooth cosmology fields.")
+    p.add_argument("--paradigm", default="masked", choices=["masked", "multicrop"],
+                   help="masked = I-JEPA masked-latent prediction (default); multicrop = DINO/VICReg "
+                        "augmentation-invariance across global+local crops (VISReg's native paradigm; "
+                        "needs --loss visreg + an image --dataset).")
+    p.add_argument("--n-global", type=int, default=2, help="multicrop: # global (large-scale) crops")
+    p.add_argument("--n-local", type=int, default=6, help="multicrop: # local (zoomed) crops")
     p.add_argument("--data-root", type=str, default="/workspace/data",
                    help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy (camels), or the torchvision "
                         "download/cache dir (stl10/cifar10)")

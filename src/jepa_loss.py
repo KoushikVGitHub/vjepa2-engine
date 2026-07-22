@@ -201,8 +201,9 @@ class JEPA(nn.Module):
     def __init__(self, encoder, predictor, ema_decay=0.998, stop_grad=True,
                  loss_mode="ema", sigreg_lambda=0.02,
                  var_coef=0.0, cov_coef=0.0, target_norm=False,
-                 visreg_lambda=0.8, visreg_proj_dim=384):
+                 visreg_lambda=0.8, visreg_proj_dim=384, n_global=2):
         super().__init__()
+        self.n_global = n_global                                     # multi-crop: # of global views
         if loss_mode not in LOSS_MODES:
             raise ValueError(f"unknown loss_mode {loss_mode!r} (expected one of {list(LOSS_MODES)}).")
         self.context_encoder = encoder
@@ -268,6 +269,41 @@ class JEPA(nn.Module):
             return self._forward_visreg(x, context_idx, target_idx)
         raise ValueError(
             f"unknown loss_mode {self.loss_mode!r} (expected 'ema' | 'lejepa' | 'visreg').")
+
+    def forward_multicrop(self, crops):
+        """Multi-crop augmentation-invariance forward (DINO/VICReg family) = VISReg's NATIVE paradigm.
+
+        NO masking, NO predictor. crops: (B, C, 1, H, W), C = n_global + n_local augmented views of
+        each image (globals first). Encode every crop, mean-pool to one vector per crop, project, then
+        (a) pull each crop's projection toward the mean of the GLOBAL crops (augmentation invariance =
+        the alignment signal that replaces masked prediction) and (b) VISReg-regularize the projections
+        against collapse. Uses --loss visreg (so the projector + reg are built). The probe still reads
+        the ENCODER, so eff_rank/tgt_std are monitored on the pooled encoder output, not the projector.
+        """
+        B, C = crops.shape[:2]
+        flat = crops.reshape(B * C, *crops.shape[2:])          # (B*C, 1, H, W)
+        pooled = self.context_encoder(flat).mean(dim=1)        # (B*C, d) mean-pool tokens (no CLS)
+        z = self.visreg_proj(pooled) if self.visreg_proj is not None else pooled   # (B*C, P)
+
+        zc = z.view(B, C, z.size(-1))
+        global_mean = zc[:, :self.n_global].mean(dim=1, keepdim=True)   # (B, 1, P)
+        inv_loss = (zc - global_mean).pow(2).mean()            # augmentation-invariance alignment
+
+        reg = visreg_loss(z)                                   # VISReg over ALL crop projections
+        loss = (1 - self.visreg_lambda) * inv_loss + self.visreg_lambda * reg
+
+        # Optional explicit decorrelation (same knobs as the masked path); 0 = pure VISReg multicrop.
+        if self.var_coef > 0 or self.cov_coef > 0:
+            var_l, cov_l = variance_covariance_reg(z)
+            loss = loss + self.var_coef * var_l + self.cov_coef * cov_l
+            self.last_var, self.last_cov = var_l.item(), cov_l.item()
+        else:
+            self.last_var = self.last_cov = 0.0
+
+        self.last_pred = inv_loss.item()                       # reuse the 'pred' log slot for inv_loss
+        self.last_reg = reg.item()
+        self._stash_collapse_stats(pooled, pooled)             # rank/std on the ENCODER (probe reads it)
+        return loss, pooled
 
     def _forward_ema(self, x, context_idx, target_idx):
         "Executes the standard JEPA forward pass using an EMA teacher and stop-gradient."
