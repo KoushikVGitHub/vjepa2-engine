@@ -369,12 +369,23 @@ class JEPA(nn.Module):
         #     reg well above the prediction is what stops the early low-rank collapse.
         loss = (1 - self.visreg_lambda) * pred_loss + self.visreg_lambda * reg
 
-        # Stash for logging / the abort guard. var/cov are not part of VISReg -> report 0 so the
-        # shared log line stays uniform across modes.
+        # (5b) OPTIONAL explicit decorrelation on the ENCODER tokens (never the projector -- the probe
+        #      reads the encoder). Pure VISReg's sliced-Wasserstein shape term is a SOFT rank driver
+        #      and stalled at eff_rank ~4-8 on these smooth multifield maps; the same off-diagonal
+        #      covariance penalty that took lejepa to rank 38 supplies the hard, correctly-directed
+        #      anti-collapse force VISReg lacks. Reuses the --var-coef/--cov-coef knobs; both 0
+        #      (default) = pure VISReg. Added OUTSIDE the convex combo, exactly as in lejepa.
+        if self.var_coef > 0 or self.cov_coef > 0:
+            var_l, cov_l = variance_covariance_reg(full_flat)
+            loss = loss + self.var_coef * var_l + self.cov_coef * cov_l
+            self.last_var = var_l.item()
+            self.last_cov = cov_l.item()
+        else:
+            self.last_var = 0.0                                  # pure VISReg -> no var/cov terms
+            self.last_cov = 0.0
+
         self.last_pred = pred_loss.item()
         self.last_reg = reg.item()
-        self.last_var = 0.0
-        self.last_cov = 0.0
         self._stash_collapse_stats(tgt, full_flat)
 
         return loss, tgt
