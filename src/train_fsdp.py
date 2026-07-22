@@ -34,7 +34,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 
-from jepa_loss import JEPA, ViTEncoder, ViTPredictor, random_block_mask
+from jepa_loss import JEPA, ViTEncoder, ViTPredictor, random_block_mask, LOSS_MODES
 from data.fields import FieldMapDataset
 
 
@@ -124,12 +124,10 @@ class JEPAStep(nn.Module):
 
     @torch.no_grad()
     def step_ema(self):
-        if self.jepa.loss_mode != "ema":          # lejepa has no teacher -> no-op
-            return
-        d = self.jepa.ema_decay
-        for pt, po in zip(self.jepa.target_encoder.parameters(),
-                          self.jepa.context_encoder.parameters()):
-            pt.mul_(d).add_(po, alpha=1 - d)
+        # Delegate to the library update -- itself a no-op in teacher-free modes (see LOSS_MODES).
+        # Under FSDP(use_orig_params=True) .parameters() yields this rank's shards, so the EMA runs
+        # correctly per-shard, same as a re-inlined loop would.
+        self.jepa.step_ema()
 
 
 def build_model(args, device):
@@ -154,7 +152,7 @@ def build_model(args, device):
     jepa = JEPA(enc, pred, ema_decay=0.998, stop_grad=True,
                 loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda,
                 var_coef=args.var_coef, cov_coef=args.cov_coef,
-                target_norm=args.target_norm)
+                target_norm=args.target_norm, visreg_coef=args.visreg_coef)
     return JEPAStep(jepa, grid, block=args.block, n_blocks=args.n_blocks).to(device)
 
 
@@ -319,11 +317,13 @@ def estimate_mfu(args, n_online, step_time):
 
     grid = args.img // args.patch
     tokens = args.batch * grid * grid
-    if args.loss == "lejepa":
-        flops_step = (6 * n_online + 2 * n_online) * tokens
-    else:
+    if LOSS_MODES[args.loss]["needs_teacher"]:
+        # ema: one online forward + a cheaper frozen (half-size) teacher forward.
         n_target = n_online // 2 if n_online else 0
         flops_step = (6 * n_online + 2 * n_target) * tokens
+    else:
+        # lejepa/visreg: shared encoder run TWICE (masked context + full image), no teacher.
+        flops_step = (6 * n_online + 2 * n_online) * tokens
     achieved = flops_step / step_time
     return achieved / (args.peak_tflops * 1e12)
 
@@ -456,7 +456,14 @@ def main():
 
     # One generator object per rank; RESEEDED identically each step so V/t match across ranks.
     sigreg_gen = torch.Generator(device=device)
-    lejepa = (args.loss == "lejepa")
+    # Two distinct capabilities, read from the LOSS_MODES registry (no `== "lejepa"` strings):
+    #   regularized -- lejepa OR visreg: distributional reg -> collapse guard + the
+    #                  pred/reg/tgt_std/eff_rank log line apply.
+    #   synced_gen  -- lejepa ONLY: SIGReg's all-reduced CF needs a rank-synced generator (V,t).
+    #                  VISReg is a LOCAL-shard stat (sorted -> not cleanly all-reducible), no sync.
+    spec = LOSS_MODES[args.loss]
+    needs_reg = spec["regularized"]
+    sigreg_sync = spec["synced_gen"]
 
     model.train()
     warmup = min(10, args.steps // 2)
@@ -470,14 +477,14 @@ def main():
         batch = next(data).to(device, non_blocking=True)          # (B, 1, H, W)
 
         # Ensure per-step SYNCED seed so every rank draws the SAME projections V and
-        # frequencies t -- else the all-reduced sums are incomparable.
-        if lejepa: 
+        # frequencies t -- else the all-reduced sums are incomparable. (SIGReg/lejepa only.)
+        if sigreg_sync:
             sigreg_gen.manual_seed(args.seed + step)
 
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
             loss = model(batch,
-                         sigreg_generator=sigreg_gen if lejepa else None,
-                         sigreg_distributed=lejepa)
+                         sigreg_generator=sigreg_gen if sigreg_sync else None,
+                         sigreg_distributed=sigreg_sync)
         loss.backward()
         if args.grad_clip > 0:                            # tame the grad spikes that tip it into collapse
             if args.mode == "fsdp":
@@ -491,7 +498,7 @@ def main():
         if step % args.log_every == 0 or step == args.steps - 1:
             core = model.module if hasattr(model, "module") else model
             extra = ""
-            if args.loss == "lejepa":
+            if needs_reg:
                 j = core.jepa
                 extra = (f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} "
                          f"var {j.last_var:.4f} cov {j.last_cov:.4f} "
@@ -509,7 +516,7 @@ def main():
         # STARTS at ~1.8-2 and climbs out over a few hundred steps (measured: 1.8 -> 28.5 by step
         # 300), so a guard armed at LR-warmup (step 20 on a 300-step gate) would abort every
         # healthy run at minute one. Arm it only after rank has had time to climb.
-        if (lejepa and args.collapse_abort and step % args.log_every == 0
+        if (needs_reg and args.collapse_abort and step % args.log_every == 0
                 and step >= args.collapse_after):
             core = model.module if hasattr(model, "module") else model
             if collapsed(core.jepa, args, device):
@@ -556,8 +563,14 @@ def main():
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--mode", choices=["ddp", "fsdp"], default="fsdp")
-    p.add_argument("--loss", choices=["ema", "lejepa"], default="lejepa")
+    p.add_argument("--loss", choices=list(LOSS_MODES), default="lejepa",
+                   help="anti-collapse mechanism: ema (stop-grad teacher) | lejepa (SIGReg CF + "
+                        "optional VICReg var/cov patch) | visreg (single sliced-Wasserstein-to-"
+                        "Gaussian reg; needs no patch, no synced generator)")
     p.add_argument("--sigreg-lambda", type=float, default=0.02)
+    p.add_argument("--visreg-coef", type=float, default=1.0,
+                   help="VISReg reg weight in loss = pred + visreg_coef*reg (visreg mode only). "
+                        "VISReg is ~O(1), not SIGReg-scaled, so it does NOT reuse --sigreg-lambda.")
     p.add_argument("--var-coef", type=float, default=0.0,
                    help="VICReg variance-hinge weight (anisotropic-collapse patch; try ~1e-2)")
     p.add_argument("--cov-coef", type=float, default=0.0,

@@ -43,6 +43,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sigreg import sigreg_loss, variance_covariance_reg   # LeJEPA reg + VICReg anisotropy patch
+from visreg import visreg_loss                            # VISReg = successor single-objective reg
+
+
+# --------------------------------------------------------------------------- loss-mode registry
+# Single source of truth for what each anti-collapse mode NEEDS. Every mode-dependent branch --
+# here (teacher allocation, EMA no-op) and in the training harness (MFU accounting, the collapse
+# guard, per-step metric logging, the synced SIGReg generator, and the argparse --loss choices) --
+# reads these flags instead of comparing `loss_mode == "..."`. Adding a 4th mode is then: add one
+# row + write its `_forward_<mode>` method; no scattered string comparisons to hunt down.
+#
+#   needs_teacher : allocate an EMA target encoder + stop-grad (ema only). Also drives the MFU
+#                   FLOP model (frozen half-size teacher forward vs a 2nd full online forward).
+#   regularized   : uses a distributional anti-collapse reg -> emit pred/reg/tgt_std/eff_rank
+#                   metrics and arm the collapse-abort guard (lejepa, visreg).
+#   synced_gen    : the reg is a global-batch statistic needing a rank-SYNCED generator +
+#                   differentiable all-reduce (SIGReg/lejepa). VISReg is a local-shard stat (its
+#                   sort does not cleanly all-reduce), so it needs neither.
+LOSS_MODES = {
+    "ema":    {"needs_teacher": True,  "regularized": False, "synced_gen": False},
+    "lejepa": {"needs_teacher": False, "regularized": True,  "synced_gen": True},
+    "visreg": {"needs_teacher": False, "regularized": True,  "synced_gen": False},
+}
 
 
 # --------------------------------------------------------------------------- EMA + masking
@@ -178,14 +200,22 @@ class JEPA(nn.Module):
 
     def __init__(self, encoder, predictor, ema_decay=0.998, stop_grad=True,
                  loss_mode="ema", sigreg_lambda=0.02,
-                 var_coef=0.0, cov_coef=0.0, target_norm=False):
+                 var_coef=0.0, cov_coef=0.0, target_norm=False,
+                 visreg_coef=1.0):
         super().__init__()
+        if loss_mode not in LOSS_MODES:
+            raise ValueError(f"unknown loss_mode {loss_mode!r} (expected one of {list(LOSS_MODES)}).")
         self.context_encoder = encoder
         self.predictor = predictor
         self.ema_decay = ema_decay
         self.stop_grad = stop_grad                                    # ema-mode: the load-bearing switch
-        self.loss_mode = loss_mode                                    # "ema" | "lejepa"
+        self.loss_mode = loss_mode                                    # see LOSS_MODES registry
         self.sigreg_lambda = sigreg_lambda                            # LeJEPA reg weight (paper: 0.02)
+        # VISReg weight on its single scale+shape+center regularizer. Unlike SIGReg (balanced via the
+        # (1-lambda)/lambda convex combo) VISReg is added straight: loss = pred + visreg_coef * reg
+        # (paper weights the three sub-terms equally at 1). Its raw magnitude is ~O(1), NOT ~SIGReg's,
+        # so it does NOT share sigreg_lambda -- tune this independently.
+        self.visreg_coef = visreg_coef
         # Anisotropic-collapse patch (lejepa mode). SIGReg's marginal test barely resists rank
         # collapse when total variance is spread right; the VICReg var/cov term does (see sigreg.py).
         self.var_coef = var_coef                                     # variance-hinge weight (~1e-2)
@@ -194,10 +224,10 @@ class JEPA(nn.Module):
         # toward a constant" shortcut that DRIVES collapse. This is the I-JEPA/V-JEPA target-norm.
         self.target_norm = target_norm
 
-        # EMA teacher exists ONLY in ema mode. In lejepa there is no teacher (SIGReg replaces
-        # stop-grad), so skip the deepcopy -> saves ~a whole encoder's params of dead memory
-        # per GPU (matters at ViT-L). [plumbing done for you; the ML lives in _forward_lejepa]
-        if loss_mode == "ema":
+        # EMA teacher exists ONLY in ema mode. In lejepa/visreg there is no teacher (the
+        # distributional regularizer replaces stop-grad), so skip the deepcopy -> saves ~a whole
+        # encoder's params of dead memory per GPU (matters at ViT-L).
+        if LOSS_MODES[loss_mode]["needs_teacher"]:
             self.target_encoder = copy.deepcopy(encoder)
             for p in self.target_encoder.parameters():
                 p.requires_grad_(False)                               # stop-grad on target
@@ -213,7 +243,10 @@ class JEPA(nn.Module):
         elif self.loss_mode == "lejepa":
             return self._forward_lejepa(x, context_idx, target_idx,
                                         sigreg_generator, sigreg_distributed)
-        raise ValueError(f"unknown loss_mode {self.loss_mode!r} (expected 'ema' | 'lejepa').")
+        elif self.loss_mode == "visreg":
+            return self._forward_visreg(x, context_idx, target_idx)
+        raise ValueError(
+            f"unknown loss_mode {self.loss_mode!r} (expected 'ema' | 'lejepa' | 'visreg').")
 
     def _forward_ema(self, x, context_idx, target_idx):
         "Executes the standard JEPA forward pass using an EMA teacher and stop-gradient."
@@ -275,18 +308,61 @@ class JEPA(nn.Module):
         loss = ((1 - self.sigreg_lambda) * pred_loss + self.sigreg_lambda * reg
                 + self.var_coef * var_l + self.cov_coef * cov_l)
 
-        # (optional) stash components for logging / collapse watch:
+        # Stash components + collapse detectors for logging / the training-loop abort guard.
         self.last_pred = pred_loss.item()
         self.last_reg = reg.item()
         self.last_var = var_l.item()
         self.last_cov = cov_l.item()
-        self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()   # COMPLETE-collapse detector
+        self._stash_collapse_stats(tgt, full_flat)
 
-        # Effective rank (participation ratio) -> catches DIMENSIONAL collapse: variance stays
-        # healthy but piles onto a few dims, which tgt_std alone misses (and which often drops
-        # BEFORE tgt_std craters). PR = tr(C)^2 / ||C||_F^2 in [1, d]; ~d = full-rank isotropic
-        # (healthy), -> 1 = rank-1 collapse. Measured on `full` (all tokens = what SIGReg sees and
-        # the probe pools), which is the true collapse signal, not just the target subset.
+        return loss, tgt
+
+    def _forward_visreg(self, x, context_idx, target_idx):
+        "VISReg forward: shared encoder + single sliced-Wasserstein-to-Gaussian reg, no teacher, no patch."
+
+        # (1-2) Same two-forward topology as lejepa: masked context for the predictor, full-image
+        #       encoding WITH grad feeding both the targets and the regularizer.
+        ctx = self.context_encoder(x, keep=context_idx)
+        full = self.context_encoder(x)                        # (B, n, d)
+        tgt = full[:, target_idx]                             # NO stop-grad; VISReg stops collapse
+
+        # (3) Predict target latents from context (the "Invariance" term of VIS).
+        pred = self.predictor(ctx, context_idx, target_idx)
+        if self.target_norm:
+            d = pred.size(-1)
+            pred_loss = F.smooth_l1_loss(F.layer_norm(pred, (d,)), F.layer_norm(tgt, (d,)))
+        else:
+            pred_loss = F.smooth_l1_loss(pred, tgt)
+
+        # (4) VISReg over ALL token embeddings. One objective = variance(scale) + sketch(shape) +
+        #     center; its non-vanishing gradient under dimensional collapse makes the SIGReg
+        #     var/cov patch unnecessary (see src/visreg.py). Local-shard stat, no synced generator.
+        full_flat = full.reshape(-1, full.size(-1))
+        reg = visreg_loss(full_flat)
+
+        # (5) Straight add (paper weights the sub-terms equally); no (1-lambda)/lambda convex combo.
+        loss = pred_loss + self.visreg_coef * reg
+
+        # Stash for logging / the abort guard. var/cov are not part of VISReg -> report 0 so the
+        # shared log line stays uniform across modes.
+        self.last_pred = pred_loss.item()
+        self.last_reg = reg.item()
+        self.last_var = 0.0
+        self.last_cov = 0.0
+        self._stash_collapse_stats(tgt, full_flat)
+
+        return loss, tgt
+
+    def _stash_collapse_stats(self, tgt, full_flat):
+        """Record the two collapse detectors used by logging and the training-loop abort guard.
+
+        last_tgt_std -> 0 is COMPLETE collapse. last_eff_rank (participation ratio
+        PR = tr(C)^2 / ||C||_F^2, in [1, d]) catches DIMENSIONAL collapse -- variance stays healthy
+        but piles onto a few dims, which tgt_std alone misses and which usually drops BEFORE tgt_std
+        craters. Measured on `full` (all tokens = what the regularizer sees and the probe pools),
+        the true collapse signal, not just the target subset. Shared by the lejepa + visreg paths.
+        """
+        self.last_tgt_std = tgt.detach().float().std(dim=0).mean().item()
         with torch.no_grad():
             z = full_flat.detach().float()
             z = z - z.mean(dim=0, keepdim=True)
@@ -294,11 +370,9 @@ class JEPA(nn.Module):
             tr = torch.diagonal(C).sum()
             self.last_eff_rank = (tr * tr / (C.pow(2).sum() + 1e-12)).item()
 
-        return loss, tgt
-
     def step_ema(self):
-        "Triggers the EMA parameter update for the target network. No-op in LeJEPA mode."
-        if self.loss_mode == "ema":
+        "Triggers the EMA parameter update for the target network. No-op in teacher-free modes."
+        if LOSS_MODES[self.loss_mode]["needs_teacher"]:
             ema_update(self.target_encoder, self.context_encoder, self.ema_decay)
 
 
