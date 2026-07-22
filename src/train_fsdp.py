@@ -152,7 +152,8 @@ def build_model(args, device):
     jepa = JEPA(enc, pred, ema_decay=0.998, stop_grad=True,
                 loss_mode=args.loss, sigreg_lambda=args.sigreg_lambda,
                 var_coef=args.var_coef, cov_coef=args.cov_coef,
-                target_norm=args.target_norm, visreg_coef=args.visreg_coef)
+                target_norm=args.target_norm,
+                visreg_lambda=args.visreg_lambda, visreg_proj_dim=args.visreg_proj_dim)
     return JEPAStep(jepa, grid, block=args.block, n_blocks=args.n_blocks).to(device)
 
 
@@ -568,9 +569,15 @@ def parse_args():
                         "optional VICReg var/cov patch) | visreg (single sliced-Wasserstein-to-"
                         "Gaussian reg; needs no patch, no synced generator)")
     p.add_argument("--sigreg-lambda", type=float, default=0.02)
-    p.add_argument("--visreg-coef", type=float, default=1.0,
-                   help="VISReg reg weight in loss = pred + visreg_coef*reg (visreg mode only). "
-                        "VISReg is ~O(1), not SIGReg-scaled, so it does NOT reuse --sigreg-lambda.")
+    p.add_argument("--visreg-lambda", type=float, default=0.8,
+                   help="VISReg reg weight, convex: loss = (1-lambda)*pred + lambda*reg (visreg mode "
+                        "only). Reference vit-l.yaml uses 0.8 (reg gets 4x the prediction's pull); "
+                        "a 1:1 balance dimensionally collapsed (eff_rank ~3).")
+    p.add_argument("--visreg-proj-dim", type=int, default=384,
+                   help="VISReg projector/expander output dim (visreg mode). >0 regularizes a "
+                        "d->2048->2048->proj_dim head so the isotropy constraint lands on the "
+                        "projector, not the probe's encoder features; 0 = reg on encoder tokens "
+                        "directly (ablation; this is what collapsed).")
     p.add_argument("--var-coef", type=float, default=0.0,
                    help="VICReg variance-hinge weight (anisotropic-collapse patch; try ~1e-2)")
     p.add_argument("--cov-coef", type=float, default=0.0,

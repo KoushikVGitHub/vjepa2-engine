@@ -201,7 +201,7 @@ class JEPA(nn.Module):
     def __init__(self, encoder, predictor, ema_decay=0.998, stop_grad=True,
                  loss_mode="ema", sigreg_lambda=0.02,
                  var_coef=0.0, cov_coef=0.0, target_norm=False,
-                 visreg_coef=1.0):
+                 visreg_lambda=0.8, visreg_proj_dim=384):
         super().__init__()
         if loss_mode not in LOSS_MODES:
             raise ValueError(f"unknown loss_mode {loss_mode!r} (expected one of {list(LOSS_MODES)}).")
@@ -211,11 +211,12 @@ class JEPA(nn.Module):
         self.stop_grad = stop_grad                                    # ema-mode: the load-bearing switch
         self.loss_mode = loss_mode                                    # see LOSS_MODES registry
         self.sigreg_lambda = sigreg_lambda                            # LeJEPA reg weight (paper: 0.02)
-        # VISReg weight on its single scale+shape+center regularizer. Unlike SIGReg (balanced via the
-        # (1-lambda)/lambda convex combo) VISReg is added straight: loss = pred + visreg_coef * reg
-        # (paper weights the three sub-terms equally at 1). Its raw magnitude is ~O(1), NOT ~SIGReg's,
-        # so it does NOT share sigreg_lambda -- tune this independently.
-        self.visreg_coef = visreg_coef
+        # VISReg reg weight, CONVEX like lejepa: loss = (1-lambda)*pred + lambda*reg. The reference
+        # VISReg (HaiyuWu/visreg, vit-l.yaml) uses lamb=0.8 -- reg gets 4x the prediction's pull. Our
+        # first attempt used loss = pred + 1.0*reg (a 1:1 balance) and DIMENSIONALLY COLLAPSED
+        # (eff_rank pinned ~3 while tgt_std looked healthy) -- the reg was simply too soft early to
+        # stop the encoder committing to a low-rank basin. 0.8 matches the paper (and our lejepa 0.7).
+        self.visreg_lambda = visreg_lambda
         # Anisotropic-collapse patch (lejepa mode). SIGReg's marginal test barely resists rank
         # collapse when total variance is spread right; the VICReg var/cov term does (see sigreg.py).
         self.var_coef = var_coef                                     # variance-hinge weight (~1e-2)
@@ -233,6 +234,26 @@ class JEPA(nn.Module):
                 p.requires_grad_(False)                               # stop-grad on target
         else:
             self.target_encoder = None
+
+        # VISReg PROJECTOR (expander) head. The reference regularizes a projector output, NOT the
+        # backbone -- `emb, proj = net(x)`; the probe reads `emb`, VISReg acts on `proj`. That
+        # decouples the isotropy constraint from the features the probe uses, so the ENCODER can stay
+        # high-rank while the projector absorbs the Gaussianization. proj_dim=0 disables it (VISReg on
+        # the raw encoder tokens = the collapsed first attempt; kept as an ablation).
+        # DELIBERATE DEVIATIONS from the reference MLP(d->2048->2048->proj_dim, BatchNorm1d):
+        #   (1) LayerNorm not BatchNorm -- BN running-stats under FSDP+bf16 are a known crash/precision
+        #       hazard, and our VISReg stats are already per-rank-local; LN sidesteps both.
+        #   (2) applied PER-TOKEN (we have no CLS token; VISReg sees all B*n patch tokens, as in lejepa).
+        d = encoder.pos.size(-1)                                      # encoder embed dim
+        self.visreg_proj = None
+        if loss_mode == "visreg" and visreg_proj_dim > 0:
+            h = 2048
+            act = nn.GELU
+            self.visreg_proj = nn.Sequential(
+                nn.Linear(d, h), nn.LayerNorm(h), act(),
+                nn.Linear(h, h), nn.LayerNorm(h), act(),
+                nn.Linear(h, visreg_proj_dim),                       # final layer: no norm/act (VICReg-style)
+            )
 
     def forward(self, x, context_idx, target_idx,
                 sigreg_generator=None, sigreg_distributed=False):
@@ -337,11 +358,16 @@ class JEPA(nn.Module):
         # (4) VISReg over ALL token embeddings. One objective = variance(scale) + sketch(shape) +
         #     center; its non-vanishing gradient under dimensional collapse makes the SIGReg
         #     var/cov patch unnecessary (see src/visreg.py). Local-shard stat, no synced generator.
+        #     Regularize the PROJECTOR output (if present) so the isotropy constraint lands on the
+        #     expander, not the encoder tokens the probe reads. eff_rank below is still measured on
+        #     the ENCODER (full_flat) -- that is the probe-relevant collapse signal we care about.
         full_flat = full.reshape(-1, full.size(-1))
-        reg = visreg_loss(full_flat)
+        z_reg = self.visreg_proj(full_flat) if self.visreg_proj is not None else full_flat
+        reg = visreg_loss(z_reg)
 
-        # (5) Straight add (paper weights the sub-terms equally); no (1-lambda)/lambda convex combo.
-        loss = pred_loss + self.visreg_coef * reg
+        # (5) Convex combine (matches the reference lamb=0.8 and our lejepa structure): weighting the
+        #     reg well above the prediction is what stops the early low-rank collapse.
+        loss = (1 - self.visreg_lambda) * pred_loss + self.visreg_lambda * reg
 
         # Stash for logging / the abort guard. var/cov are not part of VISReg -> report 0 so the
         # shared log line stays uniform across modes.
