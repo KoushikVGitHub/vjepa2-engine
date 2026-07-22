@@ -364,6 +364,19 @@ def build_dataloader(args, world, rank):
         so that per-rank batches remain perfectly EQUAL, allowing the SIGReg loss to 
         safely rely on an exact global count of N = batch * world.
     """
+    # Natural-image VALIDATION corpus (stl10/cifar10): confirms the anti-collapse behavior on rich
+    # data (what VISReg was designed for), isolating the CAMELS collapse as a smooth-field property.
+    # Grayscale -> same 1-channel ViTEncoder; SSL only (no params/probe). Returns early.
+    if args.dataset != "camels":
+        from data.images import GrayImageDataset
+        ds = GrayImageDataset(args.data_root, name=args.dataset, img=args.img,
+                              augment=not args.no_augment)
+        rprint(f"[data] {args.dataset}: {len(ds)} grayscale images @ {args.img}x{args.img}")
+        sampler = DistributedSampler(ds, num_replicas=world, rank=rank, shuffle=True, drop_last=True)
+        loader = DataLoader(ds, batch_size=args.batch, sampler=sampler,
+                            num_workers=args.workers, pin_memory=True, drop_last=True)
+        return loader, sampler
+
     # analyze_all.py (all 13 fields) showed EVERY field is positive-definite -> uniform log10
     # (Vgas/Vcdm raw-min = +5 => velocity MAGNITUDE, not signed; MgFe +0.013). No field has a
     # degenerate/near-constant population (even p5 std is healthy), so min_std=0.05 is a defensive
@@ -585,8 +598,13 @@ def parse_args():
     p.add_argument("--target-norm", action="store_true",
                    help="no-affine LayerNorm pred & tgt before the L1 (removes the shrink-to-"
                         "constant collapse driver; I-JEPA/V-JEPA target normalization)")
+    p.add_argument("--dataset", default="camels", choices=["camels", "stl10", "cifar10"],
+                   help="camels = CAMELS multifield maps (default); stl10/cifar10 = natural-image "
+                        "validation corpus (grayscale, torchvision auto-download) to confirm the "
+                        "anti-collapse behavior on rich data vs. smooth cosmology fields.")
     p.add_argument("--data-root", type=str, default="/workspace/data",
-                   help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy")
+                   help="dir holding Maps_<field>_<suite>_LH_z=0.00.npy (camels), or the torchvision "
+                        "download/cache dir (stl10/cifar10)")
     p.add_argument("--fields", type=lambda s: [f for f in s.split(",") if f],
                    default=["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"],
                    help="comma-separated CAMELS fields to pool; default = all 12 both-suite fields. "
