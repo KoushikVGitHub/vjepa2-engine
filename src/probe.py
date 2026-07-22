@@ -209,6 +209,20 @@ def sim_split(n_maps: int, maps_per_sim: int = 15, fracs=(0.8, 0.1, 0.1), seed: 
 
 
 # --------------------------------------------------------------------- train / eval
+def _embed(encoder, batch_x, device):
+    """Tokens for a batch. encoder=None => batch_x is ALREADY the precomputed tokens.
+
+    The encoder is frozen, so its output is identical every epoch -> compute it ONCE (see
+    precompute_tokens in scripts/run_probe.py) and train the head on the cache. That turns ~epochs*
+    full ViT-L forwards into a single pass -- the dominant probe cost. When encoder is not None we
+    fall back to the live (no-grad) forward, so the un-cached path still works unchanged.
+    """
+    if encoder is None:
+        return batch_x.to(device).float()                 # cached tokens (stored bf16) -> fp32 head
+    with torch.no_grad():
+        return encoder(batch_x.to(device))
+
+
 def train_probe(encoder, head, train_loader, val_loader, device, epochs: int = 20,
                 target_mean=TARGET_MEAN, target_std=TARGET_STD):
     """
@@ -232,12 +246,10 @@ def train_probe(encoder, head, train_loader, val_loader, device, epochs: int = 2
         head.train()
         total_loss = 0.0
         for batch_x, batch_y in train_loader:
-            batch_x = batch_x.to(device)
             y = batch_y[:, :2].to(device)          # col 0 = Omega_m, col 1 = sigma_8
             y_norm = (y - tm) / ts
 
-            with torch.no_grad():
-                tokens = encoder(batch_x)
+            tokens = _embed(encoder, batch_x, device)
             mu, sigma = head(tokens)
             loss = moment_loss(mu, sigma, y_norm)
 
@@ -254,9 +266,8 @@ def train_probe(encoder, head, train_loader, val_loader, device, epochs: int = 2
             with torch.no_grad():
                 vloss = 0.0
                 for vx, vy in val_loader:
-                    vx = vx.to(device)
                     vy_norm = (vy[:, :2].to(device) - tm) / ts
-                    vmu, vsig = head(encoder(vx))
+                    vmu, vsig = head(_embed(encoder, vx, device))
                     vloss += moment_loss(vmu, vsig, vy_norm).item()
             msg += f" | val loss {vloss / len(val_loader):.4f}"
         print(msg)
@@ -283,10 +294,9 @@ def eval_probe(encoder, head, loader, device, target_mean=TARGET_MEAN, target_st
     ts = torch.tensor(target_std, device=device)
 
     for batch_x, batch_y in loader:
-        batch_x = batch_x.to(device)
         y = batch_y[:, :2].to(device)
 
-        tokens = encoder(batch_x)
+        tokens = _embed(encoder, batch_x, device)
         mu_norm, sigma_norm = head(tokens)
 
         # De-standardize back to physical units
