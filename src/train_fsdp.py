@@ -7,6 +7,25 @@ the effect of FSDP, bf16 mixed precision, and activation checkpointing.
         --mode fsdp --bf16 --ckpt --steps 200 --peak-tflops 150
 """
 import os
+import tempfile
+import warnings
+
+# --- writable JIT kernel cache (MUST be set before `import torch`) ------------------------
+# RunPod NFS root-squashes $HOME=/root, so torch's default kernel-cache dir
+# /root/.cache/torch/kernels can't be created. That disables CUDA JIT kernel caching and
+# warns on the first kernel compile (e.g. visreg's erfinv, visreg.py:84) -- and every JIT
+# kernel then RECOMPILES on each process launch. Point the cache at a writable volume so the
+# compiled kernels persist across runs (warm starts) instead of recompiling every time.
+if "PYTORCH_KERNEL_CACHE_PATH" not in os.environ:
+    for _cand in ("/workspace/.cache/torch/kernels",
+                  os.path.join(tempfile.gettempdir(), "torch_kernels")):
+        try:
+            os.makedirs(_cand, exist_ok=True)
+            os.environ["PYTORCH_KERNEL_CACHE_PATH"] = _cand
+            break
+        except OSError:
+            continue
+
 import math
 import time
 import shutil
@@ -36,6 +55,12 @@ from torch.utils.data.distributed import DistributedSampler
 
 from jepa_loss import JEPA, ViTEncoder, ViTPredictor, random_block_mask, LOSS_MODES
 from data.fields import FieldMapDataset
+
+# torch's activation-checkpointing recompute path (torch/utils/checkpoint.py) still calls the
+# deprecated torch.cpu.amp.autocast under --ckpt. It's library-internal (nothing we call) and
+# benign; filter just that one message so it doesn't flood the per-step log.
+warnings.filterwarnings("ignore", message=r".*torch\.cpu\.amp\.autocast.*",
+                        category=FutureWarning)
 
 
 def setup():
