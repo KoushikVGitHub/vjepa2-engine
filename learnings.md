@@ -141,9 +141,31 @@ convergence curve + masking sweep stop yielding gains **AND (credibility floor)*
 (0.33) *and* Ω_m ≥ ~0.65. Crucially, a **plateau *below* the floor is a publishable kill result** — the
 architecture's honest ceiling on smooth-field cosmology — **not** a licence to transfer-test a weak base.
 
-**Guardrails / open items:** cov term stays on throughout; error bars (multiple seeds) so a 0.49→0.55
-isn't noise; field choice (Mgas is feedback-contaminated — may revisit vs Mtot/Mcdm); pod is currently
-down (needs restart before any of this runs).
+**Statistical rigor (tiered, settled Q9).** Bootstrap CIs on *every* probe R² (resample test sims —
+free); screen geometries at 1 seed / plateau step; spend pretraining seeds (2–3, full convergence)
+**only on the decisive `8×1`-vs-`4×4` comparison**. Decision rule: believe an improvement only if it
+exceeds the bootstrap CI **and** replicates across ≥2 seeds on the decisive config. Every number in
+this file carries a ±, not a bare point estimate.
+
+**Tactics (T1–T6, confirmed 2026-07-24).**
+- **T1 — Field:** probe **Mgas** primary (feedback differs most across suites → strongest transfer
+  story, where a power spectrum is most brittle) + **Mtot** as a clean-field, high-ceiling sanity anchor.
+  One multifield encoder, so probing extra fields is cheap.
+- **T2 — SIMBA in parallel:** kick off the Globus SIMBA transfer (Mgas, Mtot, `params_LH_SIMBA.txt`)
+  *concurrent* with in-suite GPU work — it's I/O, keep it off the critical path.
+- **T3 — Pod / data:** `/workspace` is a RunPod network FS → checkpoints + data + Globus persist across
+  restart; re-append `runpod_auto.pub` if the SSH endpoint changes; first action on restart = verify
+  `ckpt_cov.pt` + the 12 field files are intact.
+- **T4 — Ordering:** sequential runs, both GPUs (FSDP) each — curve first (it *sets the plateau step*),
+  then geometry screen at that step, then the seeded decisive comparison; probes parallelize one-per-GPU.
+- **T5 — Norm change:** implement `FieldMapDataset` external mean/std injection when we reach the
+  transfer step, not before.
+- **T6 — Cost:** the curve's plateau step caps every later run's length (flatten at 4k ⇒ nothing runs to
+  10k) — the main lever against burning GPU-hours.
+
+**Guardrails:** cov term stays on throughout; pod is currently down (restart is the first execution step).
+
+*Design tree complete (design review 2026-07-24) — nothing left to decide; execute on pod restart.*
 
 ---
 
