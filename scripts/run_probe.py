@@ -21,7 +21,9 @@ from data.fields import FieldMapDataset
 from probe import (load_frozen_encoder, ProbeHead, sim_split,
                    train_probe, eval_probe, latent_atlas)
 
-# ViT-L encoder config -- MUST match the keeper run or the state_dict won't load.
+# Default ViT-L encoder config -- MUST match the trained run or the state_dict won't load.
+# Overridable from the CLI (--patch / --enc-d / --enc-layers / --enc-heads / --img) so a
+# patch-8 or downscaled-backbone checkpoint can be probed without editing this file.
 ENC = dict(img=256, patch=16, d=1024, heads=16, layers=24)
 
 
@@ -77,6 +79,13 @@ def main():
     ap.add_argument("--ckpt", default="/workspace/ckpt.pt")
     ap.add_argument("--data-root", default="/workspace/data")
     ap.add_argument("--field", default="Mgas")
+    # Encoder geometry -- MUST match the trained checkpoint (esp. --patch: patch-8 vs patch-16
+    # gives a different patch-embed shape, so a mismatch makes load_frozen_encoder RAISE).
+    ap.add_argument("--img", type=int, default=ENC["img"])
+    ap.add_argument("--patch", type=int, default=ENC["patch"])
+    ap.add_argument("--enc-d", type=int, default=ENC["d"])
+    ap.add_argument("--enc-heads", type=int, default=ENC["heads"])
+    ap.add_argument("--enc-layers", type=int, default=ENC["layers"])
     ap.add_argument("--suite", default="IllustrisTNG", help="in-suite (pretraining) suite")
     ap.add_argument("--heldout", default="SIMBA", help="cross-suite robustness suite (if on disk)")
     ap.add_argument("--epochs", type=int, default=20)
@@ -89,6 +98,9 @@ def main():
                     help="batch size for the one-time feature precompute pass (frozen fwd, no grad "
                          "-> can be large)")
     args = ap.parse_args()
+
+    # Build the encoder config from the CLI so a patch-8 / downscaled checkpoint loads cleanly.
+    ENC = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads, layers=args.enc_layers)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

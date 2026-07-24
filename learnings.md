@@ -169,6 +169,55 @@ this file carries a ±, not a bare point estimate.
 
 ---
 
+## Encoder architecture — decision (2026-07-24)
+
+**Decision: keep a ViT-JEPA substrate, but move off plain ViT-L toward a small, conv-stem,
+periodic-padded ViT — and prove the tokenizer hypothesis *first* with a clean patch-8 A/B.**
+
+**Why not a CNN (asked directly).** "CNN already works" refers to *supervised* CAMELS CNNs — a
+different object. This project is **self-supervised** (masked prediction, no labels) + **transfer**;
+that thesis is a statement about SSL representations, which a supervised CNN can't demonstrate. Masked
+JEPA also wants a ViT (it masks *token subsets* and attends over the visible ones; masked convolution
+is awkward). And the artifact's reason to exist is a JEPA/world-model demonstration (AMI target). So we
+keep the ViT paradigm — but **import the CNN's inductive bias** (conv stem, translation-equivariance,
+periodic padding) rather than ignoring it.
+
+**Why plain ViT-L is likely mismatched.**
+- **Over-parameterized:** ~300M params for a task of intrinsic dim ~32 / 2 target scalars → capacity
+  buys *nuisance dimensions*, not R² (the very collapse-to-junk we fought). ViT-S/B is better matched.
+- **Tokenizer band-limiting (the prime suspect for why SSL < pk):** patch-16 linear embed *averages
+  away* sub-patch (high-k) power — exactly where cosmology signal concentrates and exactly what the
+  power spectrum sees for free. This is the most plausible mechanism for sitting *below* the pk floor.
+- **Wrong priors for the field:** periodic BCs (sim-box slices) + statistical isotropy → circular
+  padding + conv equivariance are free correct priors a plain ViT must learn from data.
+
+**The deciding test (staged, cheap, in-budget): patch-16 → patch-8, everything else held.**
+Isolate the tokenizer variable — same ViT-L backbone, same cov recipe, and **hold physical mask
+geometry fixed** (`--block 8 --n-blocks 4` at patch-8 == the keeper's 64 px blocks at 25 %, vs
+`--block 4 --n-blocks 4` at patch-16). 1000 steps first, directly comparable to the 0.493 keeper.
+Command staged in `scripts/run_patch8.sh`.
+- **R² jumps toward 0.818** ⇒ the linear patch embed was discarding the high-k signal; fix = smaller
+  patch / conv stem. Clean mechanistic result *and* a remedy.
+- **R² barely moves** ⇒ the bottleneck is the SSL objective, not the tokenizer; architecture isn't the
+  lever. Also decisive.
+
+**Variable hygiene — do NOT bundle backbone-downscale with the patch test.** patch-8 (tokenizer) and
+ViT-S/B (capacity) are two variables; mixing them confounds. Order: (1) patch-8 tokenizer A/B on ViT-L,
+(2) *then* backbone-downscale as a separate arm, (3) conv-stem + circular padding only if patch-8
+confirms the tokenizer is load-bearing (that step needs a model-code change, not just flags).
+
+**Sequencing vs Track 3.** Architecture is **upstream of** the convergence curve — changing the encoder
+resets every convergence/transfer number. So settle patch-size *before* the long Track-3 runs, or run
+patch-8 as a parallel arm of step 1. Caveat: patch-8 = 4× tokens (32×32 grid) → heavier; start at
+`--batch 64 --ckpt`, and for the *final* clean number match effective batch to the keeper's 128.
+
+*Note — parked contingency (from the OpenEvolve assessment):* if σ8 stalls through the masking sweep,
+OpenEvolve (LLM evolutionary code search, cheap numpy evaluator) is a viable way to *evolve a
+non-Gaussian summary statistic* that hardens the classical σ8 baseline — seed = `scripts/ps_baseline.py`.
+Not on the critical path; it strengthens the benchmark our robustness claim is measured against.
+
+---
+
 ## My toolset for this project (Claude's skills, honed here)
 
 A living operating manual — the capabilities I have access to and the *refined pattern* for using each
