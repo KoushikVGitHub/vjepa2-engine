@@ -1,8 +1,22 @@
 # Learnings — VISReg × Cosmology Collapse Experiment
 
-A running, linear record of what this project taught me, plus the skills it exercises.
-Domain: self-supervised (JEPA) pretraining of a ViT-L encoder on CAMELS 2D cosmology field
-maps, probed for (Ω_m, σ8) parameter inference. Hardware: 2× GPU, FSDP + bf16.
+**This file is my (Claude's) continuous-learning knowledge base for this project** — the goals we set,
+the decisions and *why*, the dead-ends, and the kill-criteria — so each session compounds on the last
+instead of re-deriving. Domain: self-supervised (JEPA) pretraining of a ViT-L encoder on CAMELS 2D
+cosmology field maps, probed for (Ω_m, σ8) inference. Hardware: 2× RTX 4090, FSDP + bf16.
+
+---
+
+## Goals (the north stars)
+
+- **Immediate (✅ answered):** does adding covariance decorrelation to VISReg turn a *collapsed*
+  cosmology encoder (rank ~8, R² 0.23) into a *useful* one, measured by probe R²? → **Yes** — rank
+  11.7 → 72, Ω_m R² 0.235 → 0.493.
+- **Project claim (Track 3, in progress):** one frozen JEPA encoder that learns cosmological
+  parameters from smooth, low-intrinsic-dim fields and **transfers across simulation suites**
+  (IllustrisTNG → SIMBA) with **better retention than a power spectrum** — evidence of learned
+  physics, not curve-fitting.
+- **Meta:** keep this file compounding — record goal, decision, *why*, and kill-criteria every session.
 
 ---
 
@@ -122,41 +136,46 @@ the physics well in-suite. So:
    to inject external mean/std. **Success = retention (SIMBA R² / ITNG R²) beats the power spectrum's
    retention** — a win is possible at modest absolute R².
 
+**Exit gate — in-suite phase → transfer (settled Q8).** Stop improving in-suite when **(plateau)** the
+convergence curve + masking sweep stop yielding gains **AND (credibility floor)** σ8 ≥ the pk floor
+(0.33) *and* Ω_m ≥ ~0.65. Crucially, a **plateau *below* the floor is a publishable kill result** — the
+architecture's honest ceiling on smooth-field cosmology — **not** a licence to transfer-test a weak base.
+
 **Guardrails / open items:** cov term stays on throughout; error bars (multiple seeds) so a 0.49→0.55
 isn't noise; field choice (Mgas is feedback-contaminated — may revisit vs Mtot/Mcdm); pod is currently
 down (needs restart before any of this runs).
 
 ---
 
-## Skills exercised (mapped to the world-model / AMI goal)
+## My toolset for this project (Claude's skills, honed here)
 
-**Deep (the vertical of the "T") — SSL & training dynamics**
-- Self-supervised representation learning: JEPA / masked prediction, VISReg, SIGReg, VICReg,
-  multi-crop invariance — and implementing a loss (VISReg) faithfully from the paper.
-- Diagnosing **representation collapse**: effective rank (participation ratio), covariance
-  structure, singular-value spectra, distinguishing complete vs anisotropic/dimensional collapse.
-- Loss-function design and reasoning about *why* a term works (the `r_eff = D/(1+cov_loss)` identity),
-  not just that it works.
+A living operating manual — the capabilities I have access to and the *refined pattern* for using each
+on **this** project, so the workflow compounds across sessions instead of restarting cold.
 
-**Broad (the horizontal) — systems, science, method**
-- **Distributed training:** PyTorch FSDP / DDP, `torchrun`, multi-GPU sharding, bf16 mixed
-  precision, activation checkpointing, MFU measurement and throughput tuning.
-- **Scientific ML:** cosmology domain (CAMELS multifield maps, Ω_m / σ8 inference), power spectra,
-  moments, non-Gaussian statistics, intrinsic-dimensionality reasoning.
-- **Experimental design:** controlled A/B with one variable changed, classical baselines as
-  information ceilings, ablations, separating *correlation* (rank↑) from *causation* (R²↑).
-- **Data engineering:** memory-mapped datasets, offline curation + manifest caching, frozen-feature
-  caching, multi-field corpus pooling.
-- **MLOps / infra:** RunPod GPU pods, SSH automation (key management, detached `setsid nohup` runs,
-  log-polling watchers that survive disconnects), GPU scheduling, environment debugging.
-- **Numerical / statistical methods:** ridge regression (closed-form, dependency-free), FFT-based
-  radial power spectra, R² / RMSE evaluation, sim-level train/val splits to prevent leakage.
-- **Software engineering:** clean segregation of concerns (a `LOSS_MODES` capability registry),
-  reproducible git-driven workflow, portfolio-quality documentation.
-- **Scientific judgement:** steelmanning an external model's (wrong) claim against measured evidence,
-  and updating my own framing (rank-as-objective → rank-as-diagnostic) when the data demanded it.
+- **Remote execution — SSH bridge to the RunPod pod.** Dedicated passphrase-less key
+  (`~/.ssh/runpod_auto`); write run scripts to `/workspace`, launch training **detached** with
+  `setsid nohup` so it survives SSH drops, drive both GPUs. Replaces the old "user pastes logs by hand"
+  loop. *Gotcha learned:* RunPod NFS root-squashes `$HOME` → set `PYTORCH_KERNEL_CACHE_PATH`, use
+  `tar --no-same-owner`.
+- **Long-run orchestration — background watchers.** `run_in_background` SSH pollers that block on the
+  pod until `=== RESULT ===` or a crash marker, then notify me — no busy-waiting. Parallel probes
+  pinned per-GPU via `CUDA_VISIBLE_DEVICES`. *Gotcha:* a 30-min watcher SSH can drop (`Connection reset`)
+  — the detached job survives, just reconnect and re-tail.
+- **Faithful external research — WebFetch / WebSearch + GitHub MCP.** Verify claims against the *actual*
+  source instead of recalling: confirmed VISReg's `num_projections=4096`, that Galaxy10 is a
+  *downstream-only* eval (never pretraining), and the ideal-R² ceilings. Rule: read the repo/paper, don't guess.
+- **Codebase tools — Grep / Glob / Read / Edit / Write.** Ground every design question in what the code
+  *actually does* before recommending — e.g. caught the silent SIMBA-normalization choice in
+  `run_probe.py` and the real mask geometry (`block 4 × n_blocks 4`) in `jepa_loss.py`.
+- **Version control — git to `main`.** Push so the pod pulls; **no AI-attribution trailers** (your preference).
+- **Artifacts — the `Artifact` tool.** Publish this file as a private, shareable page; same URL on every update.
+- **Persistent memory — the `memory/` system.** Auto-loads next session, so verdicts, the reframe, and
+  the plan survive context resets. `learnings.md` is the repo-side, human-readable companion.
+- **Structured design review — the `grill-me` skill.** Dependency-ordered interrogation of a plan; this
+  session produced the entire Track-3 design (value prop → sequencing → masking → exit gate).
+- **Subagents — the `Agent` tool.** Parallel code-review / research on demand (a review agent previously
+  caught 3 bugs, incl. a post-abort save that would have destroyed a checkpoint).
 
-**Why it matters for the goal:** this is exactly the AMI-Labs shape of work — improving on EMA /
-stop-gradient heuristics with distributional + decorrelation priors, on a real world-model encoder,
-with the evidence discipline to know when a representation is genuinely learning the physics versus
-gaming the pretext.
+**How to keep this sharp:** whenever a tool saves a cycle — or costs one — note the refined pattern (and
+the gotcha) here. This section is meant to *improve* as the project runs: a compounding operating manual,
+not a static list.
