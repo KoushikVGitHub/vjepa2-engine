@@ -87,6 +87,47 @@ removing the radial power spectrum). Concrete gap to close: **+0.33 on Ω_m** ju
 
 ---
 
+## Track 3 — the plan (settled via design review, 2026-07-24)
+
+Decided through a structured design interrogation ("grill-me"), ordered by dependency.
+
+**Value proposition (the claim).** *Not* "beat the power spectrum on Ω_m" — a losing fight, since
+Ω_m is 2-point-saturated (moments add ~nothing: 0.818 → 0.823). The claim is **cross-suite transfer
+/ relative robustness**: one frozen encoder, pretrained on IllustrisTNG, that **retains more of its
+accuracy on held-out SIMBA than a power spectrum does** — evidence it learned generalizable physics,
+not per-suite curve-fitting. Multifield synergy is an opportunistic free-rider, tested only if it
+doesn't cost the transfer path.
+
+**Sequencing — in-suite first, then transfer.** A sub-classical in-suite representation makes a weak
+transfer headline; you can't claim "it learned physics that transfers" before it demonstrably learned
+the physics well in-suite. So:
+
+1. **Convergence curve — kill the undertraining confound *first*.** The 0.49 was measured at 1000
+   steps and never plateaued. Train the winning recipe (`--var-coef 5.0 --cov-coef 4e-2 --target-norm`)
+   to ~10k steps, `--save-every 2000`, probe at 2k/4k/6k/8k/10k → the *true* converged baseline plus an
+   R²-vs-steps curve. Every later experiment must beat this, not the undertrained number.
+2. **Harder masking = geometry, not ratio.** The current mask (4×4 × n_blocks 4, ~25% *scattered*) is
+   trivially interpolable on a smooth field — the exact shortcut. Sweep toward **large contiguous**
+   target blocks; **`8×1` is the key control** (same 25% ratio as 4×4, only geometry differs → isolates
+   shape from amount). Keep the cov term on (a harder task can re-trigger collapse). **Watch σ8** at
+   every geometry — for a large hole in a *non-Gaussian* field, the gap between Gaussian interpolation
+   and the truth *is* the non-Gaussian signal, so masking is implicitly a σ8 lever too.
+3. **Non-Gaussian target — deferred.** Build it (wavelet/scattering, or de-power-spectrum'd residual)
+   *only if* σ8 refuses to move after the masking sweep. Keeps lever count minimal and makes the
+   non-Gaussian claim earned, not assumed.
+4. **Then cross-suite transfer.** Machinery already exists (`run_probe.py`: frozen ITNG encoder +
+   ITNG-trained probe → eval SIMBA). Blocked only on SIMBA maps (Globus transfer). **Headline metric =
+   ITNG-normalization applied to SIMBA inputs** (true zero-shot — the honest test), with SIMBA-norm
+   reported as a decomposition (input-scale vs feature-mismatch). Needs a small `FieldMapDataset` change
+   to inject external mean/std. **Success = retention (SIMBA R² / ITNG R²) beats the power spectrum's
+   retention** — a win is possible at modest absolute R².
+
+**Guardrails / open items:** cov term stays on throughout; error bars (multiple seeds) so a 0.49→0.55
+isn't noise; field choice (Mgas is feedback-contaminated — may revisit vs Mtot/Mcdm); pod is currently
+down (needs restart before any of this runs).
+
+---
+
 ## Skills exercised (mapped to the world-model / AMI goal)
 
 **Deep (the vertical of the "T") — SSL & training dynamics**
