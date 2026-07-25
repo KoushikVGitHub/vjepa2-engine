@@ -114,24 +114,29 @@ removing the radial power spectrum). Concrete gap to close: **+0.33 on Ω_m** ju
 - **Detach with tmux, never `nohup … &` over one-shot SSH.** The backgrounded job races the channel-close
   SIGHUP and dies (no log written). `tmux new-session -d` fully detaches and survives drops.
 
-**L11 — Tokenizer A/B result (2026-07-25): patch-8 did NOT close the gap.**
-Ran patch-16 vs patch-8 (both cov-recipe, batch 16, 1000 steps, single-GPU-parallel on 2× A4000),
-probed Mgas in-suite:
+**L11 — Tokenizer A/B result (2026-07-25): patch-8 HELPS (Ω_m +50% rel), but the batch mattered decisively.**
+patch-16 vs patch-8, cov-recipe, 1000 steps, single-GPU-parallel on 2× A4000, Mgas in-suite.
+**Ran it TWICE — the batch size flipped the conclusion:**
 
-| arm | Ω_m R² | σ8 R² |
+| arm | batch 16: Ω_m / σ8 | **eff-batch 32: Ω_m / σ8** |
 |---|---|---|
-| patch-16 (control) | 0.126 | 0.211 |
-| patch-8 (test) | 0.130 | **0.061** |
-| pk floor | 0.818 | 0.331 |
+| patch-16 (control) | 0.126 / 0.211 | 0.197 / 0.225 |
+| patch-8 (test) | 0.130 / **0.061** | **0.296 / 0.240** |
+| Δ (p8 − p16) | +0.004 / **−0.150** | **+0.099 / +0.015** |
+| pk floor | 0.818 / 0.331 | 0.818 / 0.331 |
 
-**Ω_m flat (within noise), σ8 got *worse*.** So the *linear-patch-embed band-limiting* hypothesis is
-**not supported** — halving the patch did not recover high-k signal. **⚠ Not yet a clean kill:** at a
-fixed 1000-step/batch-16 budget, patch-8 has **4× the tokens** and a bigger representation to learn, so
-it's *inherently more undertrained* than patch-16 at equal steps — that asymmetry alone could produce the
-σ8 drop. Both arms are also in the undertrained batch-16 regime (patch-16's own 0.126 is far below its
-batch-64 keeper of 0.49). **To settle it:** the Track-3 convergence run — train both to their own plateau
-(matched on data/epochs, not raw steps), then compare. Cost of this A/B: patch-8 batch-64 OOMs a 16 GB
-A4000 (SIGReg loss scales with the 1024-token count) → forced to batch 16, which is what undertrained it.
+**At batch 16, patch-8 looked flat/worse — a FALSE NEGATIVE.** At effective batch 32 (grad-accum,
+micro-16×2), patch-8 is **clearly better: Ω_m 0.197→0.296 (+50% rel)**, σ8 slightly up. **⇒ the
+linear-patch-embed band-limiting hypothesis IS supported** — finer patches recover high-k signal, and the
+gain concentrates on **Ω_m** (the 2-point/high-k-dominated parameter, exactly where patch-16 averaging
+loses most). **Lesson: patch-8's 4× token space needs adequate effective batch to pay off; undertrained,
+its bigger representation *hurts*.** Two caveats: (1) it **narrows but does not close** the gap — 0.296 «
+pk's 0.818, both arms still undertrained at 1000 steps (batch-64 keeper alone = 0.49); (2) settle the true
+converged gap with the Track-3 convergence run (both to plateau).
+
+Infra to make batch 32 fit on 16 GB: patch-8 true batch-32 OOMs by ~300 MB (SIGReg loss ∝ 1024-token
+count) → added **`--grad-accum`** (effective batch = batch×accum at one-micro-batch peak mem; batch-stat
+losses stay per-micro-batch). Both arms matched at micro-16×accum-2 to keep the A/B clean.
 
 ---
 
