@@ -114,6 +114,25 @@ removing the radial power spectrum). Concrete gap to close: **+0.33 on Ω_m** ju
 - **Detach with tmux, never `nohup … &` over one-shot SSH.** The backgrounded job races the channel-close
   SIGHUP and dies (no log written). `tmux new-session -d` fully detaches and survives drops.
 
+**L11 — Tokenizer A/B result (2026-07-25): patch-8 did NOT close the gap.**
+Ran patch-16 vs patch-8 (both cov-recipe, batch 16, 1000 steps, single-GPU-parallel on 2× A4000),
+probed Mgas in-suite:
+
+| arm | Ω_m R² | σ8 R² |
+|---|---|---|
+| patch-16 (control) | 0.126 | 0.211 |
+| patch-8 (test) | 0.130 | **0.061** |
+| pk floor | 0.818 | 0.331 |
+
+**Ω_m flat (within noise), σ8 got *worse*.** So the *linear-patch-embed band-limiting* hypothesis is
+**not supported** — halving the patch did not recover high-k signal. **⚠ Not yet a clean kill:** at a
+fixed 1000-step/batch-16 budget, patch-8 has **4× the tokens** and a bigger representation to learn, so
+it's *inherently more undertrained* than patch-16 at equal steps — that asymmetry alone could produce the
+σ8 drop. Both arms are also in the undertrained batch-16 regime (patch-16's own 0.126 is far below its
+batch-64 keeper of 0.49). **To settle it:** the Track-3 convergence run — train both to their own plateau
+(matched on data/epochs, not raw steps), then compare. Cost of this A/B: patch-8 batch-64 OOMs a 16 GB
+A4000 (SIGReg loss scales with the 1024-token count) → forced to batch 16, which is what undertrained it.
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
