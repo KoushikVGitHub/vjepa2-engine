@@ -21,12 +21,14 @@ set -euo pipefail
 
 WS=/workspace
 STEPS=${STEPS:-1000}      # comparable to the 0.493 keeper; bump once the delta is known
-BATCH=${BATCH:-64}        # per-GPU; matched across arms. patch8 = 4x tokens -> --ckpt on both.
+BATCH=${BATCH:-32}        # per-GPU; matched across arms. 16GB RTX A4000 + patch8's 4x tokens
+                          # -> 32 is the safe fit (also the proven README keeper batch). --ckpt on both.
+PEAK=${PEAK:-77}          # RTX A4000 bf16 (FP32-accum) TFLOPS, for honest MFU (4090 was 165).
 FIELD=${FIELD:-Mgas}
 
 # --- shared loss recipe = the covariance-decorrelation keeper (README canonical, R^2 ~0.50) ---
 RECIPE="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 \
-        --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt"
+        --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops $PEAK"
 
 echo "==================== ARM A: patch-16 control ===================="
 torchrun --standalone --nproc_per_node=2 src/train_fsdp.py \
