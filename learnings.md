@@ -138,6 +138,19 @@ Infra to make batch 32 fit on 16 GB: patch-8 true batch-32 OOMs by ~300 MB (SIGR
 count) → added **`--grad-accum`** (effective batch = batch×accum at one-micro-batch peak mem; batch-stat
 losses stay per-micro-batch). Both arms matched at micro-16×accum-2 to keep the A/B clean.
 
+**L12 — eff_rank is capped by the BATCH (samples in the covariance estimate), not just steps.**
+The feature covariance is estimated over N samples per step, so `eff_rank ≤ N`. Empirically rank ≈
+0.55–0.59 × global-batch at 1000 steps (still *climbing*): **rank 38 @ batch 64, rank 72 @ batch 128.**
+So global batch 32 caps rank ~12 — **below the ~32-dim intrinsic cosmology dimension** (ridge R²
+saturates at k≈32) → **R² is bottlenecked for a batch reason, masquerading as a convergence plateau.**
+⚠ **grad-accum does NOT fix this** — the batch-statistic is computed per micro-batch, so accum-2 keeps a
+16-sample statistic and rank stays ~12. Only a genuinely larger batch (or 2-GPU **distributed** SIGReg,
+which all-reduces the statistic over the global batch) raises the sample count. **Fix: run global batch
+64** (2-GPU × 32/GPU, distributed SIGReg = 64-sample stat) → rank ~38 ≥ 32, the keeper's 0.50 regime.
+Going to 128 (rank 72) doesn't improve R² — cosmology only needs ~32 dims, so 64 is the efficient sweet
+spot. *Takeaway: when a JEPA probe R² plateaus low, check `eff_rank` vs both the intrinsic task dim AND
+the batch ceiling before blaming training length.*
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
