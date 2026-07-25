@@ -138,6 +138,25 @@ Infra to make batch 32 fit on 16 GB: patch-8 true batch-32 OOMs by ~300 MB (SIGR
 count) → added **`--grad-accum`** (effective batch = batch×accum at one-micro-batch peak mem; batch-stat
 losses stay per-micro-batch). Both arms matched at micro-16×accum-2 to keep the A/B clean.
 
+**L13 — Convergence result (2026-07-25, global-batch 64, 4000 steps): patch-8 wins decisively AND beats pk on σ8.**
+Seeded probe ladder, Mgas in-suite, 2-GPU global batch 64 (rank ~25):
+
+| step | patch-16 (Ω_m / σ8) | patch-8 (Ω_m / σ8) |
+|---|---|---|
+| 2000 | 0.350 / 0.284 | 0.626 / 0.363 |
+| 4000 | 0.433 / 0.295 | **0.630 / 0.367** |
+| pk floor | 0.818 / 0.331 | 0.818 / 0.331 |
+
+- **Tokenizer band-limiting CONFIRMED, large:** patch-8 Ω_m 0.63 vs patch-16 0.43 (+0.20, +45% rel), σ8 0.37 vs 0.30.
+- **patch-8 σ8 0.367 > pk-alone 0.331** — the encoder beats a 2-point statistic on the *non-Gaussian* parameter
+  (pk+moments 0.463 still leads σ8, but beating pk-alone is the signal the transfer story needs).
+- **Ω_m narrowed not closed:** 0.63 « pk 0.818 (Ω_m is 2-point-saturated — pk hard to beat there).
+- **Convergence:** patch-8 **plateaued** (0.626→0.630 by step 2000); patch-16 **still climbing** (0.35→0.43).
+- ⚠ **plateau is likely RANK-limited, not fundamental:** rank ~25 < 32-dim floor = the **16 GB A4000 ceiling**
+  (global-64 is the max batch patch-8 fits). 24 GB cards (batch 64/GPU → rank ~72) could push patch-8 past 0.63.
+- **Decision:** patch-8 is the encoder going forward. Exit gate: σ8 ✓ (0.367 ≥ 0.33), Ω_m marginal (0.630 < 0.65,
+  plausibly hardware-capped). The batch-16 A/B verdict (L11) was DOUBLY undertrained (batch + steps); this is the real one.
+
 **L12 — eff_rank is capped by the BATCH (samples in the covariance estimate), not just steps.**
 The feature covariance is estimated over N samples per step, so `eff_rank ≤ N`. Empirically rank ≈
 0.55–0.59 × global-batch at 1000 steps (still *climbing*): **rank 38 @ batch 64, rank 72 @ batch 128.**
