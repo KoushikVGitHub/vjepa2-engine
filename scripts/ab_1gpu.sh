@@ -20,9 +20,10 @@ WS=/workspace
 cd /workspace/vjepa2-engine
 export PYTORCH_KERNEL_CACHE_PATH=/workspace/.cache/torch/kernels
 STEPS=${STEPS:-1000}
-BATCH=${BATCH:-16}
-C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops 77 --d 1024 --layers 24 --heads 16 --steps $STEPS --batch $BATCH --log-every 50"
-echo "=== A/B launch: STEPS=$STEPS BATCH=$BATCH ==="
+BATCH=${BATCH:-16}     # micro-batch (peak-memory unit)
+ACCUM=${ACCUM:-2}     # grad-accum -> EFFECTIVE batch = BATCH*ACCUM = 32 (the target), fits 16GB.
+C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops 77 --d 1024 --layers 24 --heads 16 --steps $STEPS --batch $BATCH --grad-accum $ACCUM --log-every 50"
+echo "=== A/B launch: STEPS=$STEPS BATCH=$BATCH ACCUM=$ACCUM (effective $((BATCH*ACCUM))) ==="
 
 # distinct rdzv ports so the two torchruns don't collide on the same host
 CUDA_VISIBLE_DEVICES=0 torchrun --nnodes=1 --nproc_per_node=1 --rdzv-backend=c10d --rdzv-endpoint=localhost:29511 --rdzv-id=p16 \

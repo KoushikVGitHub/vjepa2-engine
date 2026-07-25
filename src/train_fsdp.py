@@ -544,18 +544,26 @@ def main():
         if step == warmup:
             torch.cuda.synchronize()
             t0 = time.time()
-        batch = next(data).to(device, non_blocking=True)          # (B, 1, H, W)
+        # Gradient accumulation: run grad_accum micro-batches, scale each loss by 1/grad_accum,
+        # accumulate grads, then a single optimizer step -> effective batch = batch * grad_accum
+        # at one-micro-batch peak memory. grad_accum=1 reduces exactly to the plain single-step path.
+        # (Single-GPU here => NO_SHARD => no cross-rank grad reduction, so no model.no_sync() needed.)
+        opt.zero_grad(set_to_none=True)
+        loss_val = 0.0
+        for micro in range(args.grad_accum):
+            batch = next(data).to(device, non_blocking=True)          # (B, 1, H, W)
 
-        # Ensure per-step SYNCED seed so every rank draws the SAME projections V and
-        # frequencies t -- else the all-reduced sums are incomparable. (SIGReg/lejepa only.)
-        if sigreg_sync:
-            sigreg_gen.manual_seed(args.seed + step)
+            # Ensure per-microbatch SYNCED seed so every rank draws the SAME projections V and
+            # frequencies t -- else the all-reduced sums are incomparable. (SIGReg/lejepa only.)
+            if sigreg_sync:
+                sigreg_gen.manual_seed(args.seed + step * args.grad_accum + micro)
 
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
-            loss = model(batch,
-                         sigreg_generator=sigreg_gen if sigreg_sync else None,
-                         sigreg_distributed=sigreg_sync)
-        loss.backward()
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_autocast):
+                loss = model(batch,
+                             sigreg_generator=sigreg_gen if sigreg_sync else None,
+                             sigreg_distributed=sigreg_sync)
+            (loss / args.grad_accum).backward()
+            loss_val += loss.item() / args.grad_accum
         if args.grad_clip > 0:                            # tame the grad spikes that tip it into collapse
             if args.mode == "fsdp":
                 model.clip_grad_norm_(args.grad_clip)     # FSDP-aware: handles sharded grads correctly
@@ -563,8 +571,7 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         opt.step()
         sched.step()
-        opt.zero_grad(set_to_none=True)
-        (model.module if hasattr(model, "module") else model).step_ema()
+        (model.module if hasattr(model, "module") else model).step_ema()   # grads zeroed at top of next step
         if step % args.log_every == 0 or step == args.steps - 1:
             core = model.module if hasattr(model, "module") else model
             extra = ""
@@ -573,7 +580,7 @@ def main():
                 extra = (f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} "
                          f"var {j.last_var:.4f} cov {j.last_cov:.4f} "
                          f"tgt_std {j.last_tgt_std:.4f} eff_rank {j.last_eff_rank:.1f}")
-            rprint(f"step {step:>4} loss {loss.item():.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
+            rprint(f"step {step:>4} loss {loss_val:.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
         # Periodic checkpoints: insurance against a long run dying, AND the raw material for an
         # R^2-vs-pretraining-steps curve (probe each one) instead of a single end-of-run point.
@@ -705,7 +712,12 @@ def parse_args():
     p.add_argument("--pred-d", type=int, default=384, help="predictor width (lighter than d)")
     p.add_argument("--pred-heads", type=int, default=6)
     p.add_argument("--pred-layers", type=int, default=6)
-    p.add_argument("--batch", type=int, default=64, help="per-GPU batch")
+    p.add_argument("--batch", type=int, default=64, help="per-GPU MICRO-batch")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="gradient-accumulation steps: effective batch = batch * grad_accum. "
+                        "Lets a 16GB card reach a larger effective batch (peak mem stays at one "
+                        "micro-batch). NB: the batch-statistic losses (var/cov/SIGReg) are still "
+                        "computed per MICRO-batch; accumulation raises the optimizer's effective batch.")
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--log-every", type=int, default=20, help="print step metrics every N steps")
     p.add_argument("--lr", type=float, default=1.5e-4)
