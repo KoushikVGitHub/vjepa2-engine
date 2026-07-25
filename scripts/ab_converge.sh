@@ -5,8 +5,11 @@
 # 2-GPU data-parallel per arm. NCCL_P2P_DISABLE=1 works around the A4000 no-NVLink P2P deadlock
 # (verified: 2-GPU steps clean with it). Benefits vs the single-GPU grad-accum A/B:
 #   * both GPUs saturated + ~2x faster
-#   * global batch = 16/GPU * 2 = 32, all-reduced in the SIGReg distributed path => a TRUE
-#     32-sample batch statistic (better than grad-accum's per-microbatch-16).
+#   * global batch = 32/GPU * 2 = 64, all-reduced in the SIGReg distributed path => a TRUE
+#     64-sample batch statistic. This MATTERS: eff_rank <= #samples, so batch 32 caps rank ~12
+#     (below the ~32-dim intrinsic cosmology dimension -> R^2 bottlenecked). Global 64 -> rank ~38
+#     (>= 32), the regime where the keeper hit R^2 0.50. patch-8 peaks 15.24 GB/GPU here (fits 16 GB;
+#     peak is on step 2 and deterministic, so no mid-run OOM).
 # Arms run SEQUENTIALLY (each uses both cards); the probe ladder runs on BOTH GPUs (heavy patch-8
 # probes split across GPU0/GPU1, light patch-16 probes fill GPU0).
 #
@@ -21,8 +24,9 @@ STEPS=${STEPS:-4000}
 SAVE_EVERY=${SAVE_EVERY:-1000}
 SEED=${SEED:-0}
 PROBE_STEPS=${PROBE_STEPS:-"2000 $STEPS"}     # add 1000/3000 if the plateau is unclear
-C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops 77 --d 1024 --layers 24 --heads 16 --steps $STEPS --batch 16 --save-every $SAVE_EVERY --log-every 100"
-echo "=== CONVERGENCE: STEPS=$STEPS global-batch=32 (2-GPU DP) save-every=$SAVE_EVERY probe@[$PROBE_STEPS] seed=$SEED ==="
+BATCH=${BATCH:-32}     # per-GPU; *2 GPUs = global 64 (>= 32-dim floor). patch-8 peaks 15.2GB/GPU.
+C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops 77 --d 1024 --layers 24 --heads 16 --steps $STEPS --batch $BATCH --save-every $SAVE_EVERY --log-every 100"
+echo "=== CONVERGENCE: STEPS=$STEPS global-batch=$((BATCH*2)) (2-GPU DP) save-every=$SAVE_EVERY probe@[$PROBE_STEPS] seed=$SEED ==="
 
 echo "--- TRAIN patch16 (2-GPU) ---"
 torchrun --standalone --nproc_per_node=2 src/train_fsdp.py $C --img 256 --patch 16 --block 4 --n-blocks 4 --save $WS/ckpt_p16.pt > $WS/cv_p16.log 2>&1
