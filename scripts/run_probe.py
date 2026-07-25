@@ -86,6 +86,7 @@ def main():
     ap.add_argument("--enc-d", type=int, default=ENC["d"])
     ap.add_argument("--enc-heads", type=int, default=ENC["heads"])
     ap.add_argument("--enc-layers", type=int, default=ENC["layers"])
+    ap.add_argument("--seed", type=int, default=0, help="seed for deterministic probe (head init + shuffle)")
     ap.add_argument("--suite", default="IllustrisTNG", help="in-suite (pretraining) suite")
     ap.add_argument("--heldout", default="SIMBA", help="cross-suite robustness suite (if on disk)")
     ap.add_argument("--epochs", type=int, default=20)
@@ -98,6 +99,11 @@ def main():
                     help="batch size for the one-time feature precompute pass (frozen fwd, no grad "
                          "-> can be large)")
     args = ap.parse_args()
+
+    # Seed the probe (head init + train-loader shuffle both use torch's global RNG) so re-probing
+    # the same checkpoint is deterministic -- otherwise probe R^2 varies ~+-0.03 run-to-run, which
+    # swamps a convergence curve. Fixed seed => the R^2-vs-steps trend is signal, not head-init noise.
+    torch.manual_seed(args.seed)
 
     # Build the encoder config from the CLI so a patch-8 / downscaled checkpoint loads cleanly.
     # NB: use a distinct name (not ENC) -- assigning ENC here would shadow the module-level ENC
