@@ -100,20 +100,22 @@ def main():
     args = ap.parse_args()
 
     # Build the encoder config from the CLI so a patch-8 / downscaled checkpoint loads cleanly.
-    ENC = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads, layers=args.enc_layers)
+    # NB: use a distinct name (not ENC) -- assigning ENC here would shadow the module-level ENC
+    # for all of main(), breaking the argparse `default=ENC[...]` reads above (UnboundLocalError).
+    enc_cfg = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads, layers=args.enc_layers)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    enc = load_frozen_encoder(args.ckpt, device, **ENC)
+    enc = load_frozen_encoder(args.ckpt, device, **enc_cfg)
     n_enc = sum(p.numel() for p in enc.parameters())
-    print(f"[probe] frozen encoder loaded: {n_enc / 1e6:.1f}M params (ViT-L, {ENC})")
+    print(f"[probe] frozen encoder loaded: {n_enc / 1e6:.1f}M params (ViT-L, {enc_cfg})")
 
     ds = make_dataset(args.data_root, args.field, args.suite)
     tr_idx, va_idx, te_idx = sim_split(len(ds))
     print(f"[probe] {args.field}/{args.suite}: {len(ds)} maps -> "
           f"{len(tr_idx)} train / {len(va_idx)} val / {len(te_idx)} test (sim-level split)")
 
-    head = ProbeHead(d=ENC["d"]).to(device)
+    head = ProbeHead(d=enc_cfg["d"]).to(device)
 
     # enc_head is what train/eval call: None when features are cached (they get precomputed tokens),
     # else the live encoder. The real `enc` is still used for the one-time precompute + the atlas.
