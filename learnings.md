@@ -99,6 +99,21 @@ To justify SSL here the encoder must (a) *reach* the power spectrum's 0.82 on Ω
 pk on σ8 — a non-Gaussian-sensitive target (wavelet/scattering coefficients, or the residual after
 removing the radial power spectrum). Concrete gap to close: **+0.33 on Ω_m** just to match classical.
 
+**L10 — Infra learnings from the A4000 pod (2026-07-25, running the patch-8 A/B).**
+- **2-GPU FSDP deadlocks on A4000s (no NVLink).** First-collective NCCL hang; tell-tale =
+  **100% GPU util but only ~55% of TDP power** (76 W / 140 W) and *step-0 never logs*. Real matmuls
+  pull near TDP (~135 W). Fix here: **run single-GPU per arm, both GPUs in parallel** (`ab_1gpu.sh`) —
+  world_size=1 makes NCCL a no-op, and concurrency recovers the wall-time. (Untried alt:
+  `NCCL_P2P_DISABLE=1`.) *Lesson: at "100% util, no progress", check power draw before assuming compute.*
+- **`pkill -f <name>` kills its own SSH shell.** `pkill -f train_fsdp` matches the `bash -c` running it
+  (its argv contains the string) → SIGKILLs the parent → command returns with **no output and nothing
+  launched**. Use the self-excluding regex trick: `pkill -9 -f "train_[f]sdp"`, or `tmux kill-server`.
+- **patch-8 ViT-L is memory-bound on 16 GB.** 1024 tokens × L24, and the **SIGReg loss scales with
+  token count** (`sigreg.py` projections) → OOM in backward even at batch 32 (~14 GB). Matched **batch 16**
+  is the safe fit (~11.7 GB). Keep both arms at the same batch or the A/B is confounded.
+- **Detach with tmux, never `nohup … &` over one-shot SSH.** The backgrounded job races the channel-close
+  SIGHUP and dies (no log written). `tmux new-session -d` fully detaches and survives drops.
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
