@@ -216,6 +216,26 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   architectural. Next = build the conv-stem + circular-padding ViT (Phase 2), NOT more batch/rank.** Reusable
   rank-matched control ckpt: `ckpt_p8_b128_step3000.pt`.
 
+**L16 — Phase 1 (mask sweep) PAUSED mid-run 2026-07-26 (2/3 arms trained, NO probes yet — RESUME needed).**
+- **What ran (2× RTX 4090, global batch 96 = batch 48/GPU, STEPS=2000/arm, seed 0, patch-8 recipe):**
+  `n-blocks=4` (~25% mask, control-repro) → `ckpt_m4.pt`, ended eff_rank **35.1** (matches Phase-0 control ✓).
+  `n-blocks=8` (~50% mask) → `ckpt_m8.pt`, ended eff_rank ~33–35. Both saved to `/workspace/checkpoints/`, 844 MB, valid.
+- **Stopped deliberately** (user had to step away): killed the sweep the instant arm-8 checkpointed so `n-blocks=12`
+  never consumed GPU; removed the partial `ckpt_m12.pt`; pod left idle then stopped. `/workspace` network volume
+  persists across pod stop, so both ckpts survive.
+- **STILL TODO on resume (this is the actual Phase-1 result — none of it has run):** (1) train `n-blocks=12`
+  (~75% mask) → `ckpt_m12.pt`; (2) probe ALL THREE arms for σ8 (each ~30 min, patch-8). Only then does the
+  σ8-vs-mask curve exist. **No σ8 numbers yet.** The `mask_sweep.sh` script trains-then-probes in one pass, so a
+  clean resume = either just run the m12 arm + 3 probes by hand, or re-run the whole sweep (m4/m8 retrain is only
+  ~2 h wasted; the by-hand resume is faster).
+- **Resume recipe:** restart pod → `cd /workspace/vjepa2-engine && git pull` → for m12:
+  `NBLOCKS=12 bash scripts/mask_sweep.sh` **won't work as-is** (it always sweeps all of `4 8 12` and re-probes) —
+  simplest is to (a) train m12 with the same `C=` string + `--n-blocks 12 --save $CKPT/ckpt_m12.pt`, then
+  (b) probe each `ckpt_m{4,8,12}.pt` with `run_probe.py --patch 8 --enc-d 1024 --enc-layers 24 --enc-heads 16
+  --no-atlas --seed 0`. Compare σ8 R² vs the **0.390** baseline (m4 should reproduce it) and the pk-floor 0.331.
+- **Reminder:** before the SIMBA cross-suite download (Phase 3), bump `/workspace` storage to ~150 GB (currently
+  60 G of the 75 GB quota — SIMBA is another ~53 GB and will not fit).
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
