@@ -187,7 +187,7 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   what rank alone bought? Needs code (conv-stem patch-embed + circular padding). Phase 0 must precede it so the conv-stem's
   Ω_m payoff isn't re-confounded with batch/rank.
 
-**L15 — Phase 0 execution on 2× RTX 4090 24 GB (2026-07-26, VERDICT PENDING).**
+**L15 — Phase 0 execution on 2× RTX 4090 24 GB (2026-07-26, VERDICT: TOKENIZER-LIMITED).**
 - **Pod/infra:** fresh image has **tmux NOT preinstalled** (`apt-get install -y tmux`). Same *persisted* `/workspace`
   volume survives (all ckpts + `data/` corpus intact). The `runpod_auto` pubkey must be **re-added to
   `~/.ssh/authorized_keys` on every new pod** (the passphrased `id_ed25519` can't be used non-interactively).
@@ -199,8 +199,22 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   util, is the diagnostic.**
 - **Early rank climb (global 96):** eff_rank **1.8 → 13.6 by step 100** (cov still 20.9 → still rising), already
   tracking to beat the global-64 run's ~25 plateau. Rate ~2.3 s/step → 4000 steps ≈ 2.5 h + ~15 min probe.
-- **VERDICT PENDING:** probe ladder (steps 2000/4000) runs after training. Ω_m > ~0.70 ⇒ rank-limited (L13 right);
-  Ω_m ~0.63 at rank ~45 ⇒ tokenizer-limited ⇒ **conv-stem (Phase 2)**. [fill Ω_m/σ8 numbers on completion]
+- **Probe gotchas (patch-8 is slow):** each frozen-feature probe ≈ 25–35 min (1024 tokens × 15k maps × 3 splits
+  through the 202M ViT-L, then 20-epoch head fit). Run the two ladder probes on separate GPUs in parallel.
+- **The step-4000 ckpt was TRUNCATED (738 MB vs the valid 844 MB)** — the disk-quota-exceeded that killed the
+  in-line probe phase also corrupted the *final* save. Fix: freed ~16 GB (deleted 21 stale ckpts) and used the
+  valid **step-3000** ckpt as the converged endpoint (eff_rank had already plateaued ~35–38 by step 2600, so 3000
+  is scientifically the "converged" read). Lesson: **check `/workspace` quota headroom BEFORE a run that saves a
+  ladder** — 4 × 844 MB ckpts + a 53 GB data corpus is tight under the 75 GB per-user quota.
+- **VERDICT — TOKENIZER-LIMITED (Ω_m), rank cleared:** probe ladder (Mgas in-suite R², seed 0):
+  global-64 ref **Ω_m 0.630 / σ8 0.367** → global-96 @2000 (rank ~35) **0.584 / 0.375** → @3000 (rank ~35–38)
+  **0.630 / 0.390**. Ω_m returned to **exactly 0.630** *after* rank climbed 25 → 35+ (clearing the 32-dim floor
+  with margin) — the rank-limited hypothesis needed Ω_m > 0.70, so **rank is NOT the bottleneck.** σ8 improved
+  0.367 → 0.390 (extra rank helps the non-Gaussian channel, still beats the pk-floor 0.331) but Ω_m is flat: the
+  classic **tokenizer band-limiting** signature — patch-8's *linear* patch-embed averages away the high-k power
+  Ω_m rides on, and no amount of rank recovers it. **⇒ resolves L12↔L13 in favour of neither: the plateau is
+  architectural. Next = build the conv-stem + circular-padding ViT (Phase 2), NOT more batch/rank.** Reusable
+  rank-matched control ckpt: `ckpt_p8_b128_step3000.pt`.
 
 ---
 

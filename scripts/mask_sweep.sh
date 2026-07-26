@@ -17,9 +17,10 @@
 # STEPS=2000/arm is enough to read the sigma8 trend. 3 arms, 2-GPU each.
 #
 # Same frozen recipe + 2-GPU global-batch 64 (NCCL_P2P_DISABLE=1 for the A4000 no-NVLink P2P).
-#   tmux new-session -d -s ms "bash /workspace/mask_sweep.sh > /workspace/ms.log 2>&1"
+#   tmux new-session -d -s ms "bash /workspace/scripts/mask_sweep.sh > /workspace/logs/ms.log 2>&1"
 set -uo pipefail
 WS=/workspace
+CKPT=$WS/checkpoints; LOG=$WS/logs; mkdir -p "$CKPT" "$LOG"   # organised layout (2026-07-26)
 cd /workspace/vjepa2-engine
 export PYTORCH_KERNEL_CACHE_PATH=/workspace/.cache/torch/kernels
 export NCCL_P2P_DISABLE=1
@@ -34,13 +35,13 @@ echo "=== MASK SWEEP: patch-8 ViT-L, n-blocks in [$NBLOCKS], STEPS=$STEPS global
 
 for NB in $NBLOCKS; do
   echo "--- TRAIN n-blocks=$NB (2-GPU) ---"
-  torchrun --standalone --nproc_per_node=2 src/train_fsdp.py $C --n-blocks $NB --save $WS/ckpt_m$NB.pt > $WS/ms_m$NB.log 2>&1
+  torchrun --standalone --nproc_per_node=2 src/train_fsdp.py $C --n-blocks $NB --save $CKPT/ckpt_m$NB.pt > $LOG/ms_m$NB.log 2>&1
   echo "n-blocks=$NB train rc=$? ($(grep -c '^step' $WS/ms_m$NB.log 2>/dev/null) step-logs)"
 done
 
 echo "--- PROBE each arm (both GPUs) ---"
-pr() { CUDA_VISIBLE_DEVICES=$2 python scripts/run_probe.py --ckpt $WS/ckpt_m$1.pt --field Mgas \
-  --img 256 --patch 8 --enc-d 1024 --enc-layers 24 --enc-heads 16 --no-atlas --seed $SEED > $WS/pr_m$1.log 2>&1; }
+pr() { CUDA_VISIBLE_DEVICES=$2 python scripts/run_probe.py --ckpt $CKPT/ckpt_m$1.pt --field Mgas \
+  --img 256 --patch 8 --enc-d 1024 --enc-layers 24 --enc-heads 16 --no-atlas --seed $SEED > $LOG/pr_m$1.log 2>&1; }
 # fan the (heavy patch-8) probes across the two GPUs: round-robin the arms
 i=0
 for NB in $NBLOCKS; do pr "$NB" $((i % 2)) & i=$((i+1)); done
@@ -50,7 +51,7 @@ echo "probing done"
 echo "=== CURVE (Mgas in-suite R2, patch-8, seed=$SEED, global-batch $((BATCH*2))) ==="
 printf "%-14s | %-30s\n" "n-blocks (~%)" "Omega_m / sigma8"
 for NB in $NBLOCKS; do
-  R=$(grep -A2 "IN-SUITE" $WS/pr_m$NB.log 2>/dev/null | grep "R2" | grep -oE "Omega_m=[0-9.]+ +sigma8=[0-9.]+")
+  R=$(grep -A2 "IN-SUITE" $LOG/pr_m$NB.log 2>/dev/null | grep "R2" | grep -oE "Omega_m=[0-9.]+ +sigma8=[0-9.]+")
   printf "%-14s | %-30s\n" "$NB" "$R"
 done
 echo "pk-alone floor | Omega_m=0.818 sigma8=0.331"
