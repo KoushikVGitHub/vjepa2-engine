@@ -170,6 +170,23 @@ Going to 128 (rank 72) doesn't improve R² — cosmology only needs ~32 dims, so
 spot. *Takeaway: when a JEPA probe R² plateaus low, check `eff_rank` vs both the intrinsic task dim AND
 the batch ceiling before blaming training length.*
 
+**L14 — Architecture sequence on a 24 GB card (2026-07-26): resolve the L12↔L13 rank tension, then conv-stem.**
+Open contradiction in this log: **L12** inferred (from the ~32-dim intrinsic dim) that global batch 64 → rank ~38 ≥ 32 is
+enough and "128 won't help"; but **L13** (the real patch-8 convergence run) *observed only rank ~25 at global 64* — below
+the 32-dim floor — with Ω_m capped at 0.63. Both can't hold. Note the ceiling tracks **global batch** (samples in the
+all-reduced SIGReg statistic), not per-card VRAM: a *single* 24 GB fits only ~batch 48–56 for patch-8 (unsharded params) →
+global ≤ ~56, **no gain over today's global 64**. Need **2× 24 GB @ batch 64/GPU → global 128 → rank ~72** for the test to bite.
+Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden variable):
+- **Phase 0 — rank control / Ω_m disambiguation.** patch-8 ViT-L, n-blocks 4, global 128. Ω_m > ~0.70 ⇒ L13 right, plateau was
+  rank-limited (L12's "64 enough" was over-optimistic for patch-8's 4× tokens). Ω_m still ~0.63 at rank 72 ⇒ L12 right, rank
+  is NOT the bottleneck ⇒ tokenizer band-limiting ⇒ conv-stem warranted. This run is also the rank-matched CONTROL downstream.
+- **Phase 1 — mask sweep (σ8 lever).** `mask_sweep.sh` at BATCH=64, n-blocks 4/8/12. Push σ8 above the 0.367 that already beats pk.
+- **Phase 2 — conv-stem + circular-padding ViT (runs regardless).** Two arms (hygiene): (2a) plain ViT patch-8 + **circular
+  padding** (physically exact for CAMELS periodic boxes, near-free), (2b) **conv-stem tokenizer** + circular padding. Control =
+  Phase-0/1 best plain-ViT patch-8 at matched global batch. Q: does the conv-stem inductive bias push Ω_m toward 0.818 *beyond*
+  what rank alone bought? Needs code (conv-stem patch-embed + circular padding). Phase 0 must precede it so the conv-stem's
+  Ω_m payoff isn't re-confounded with batch/rank.
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
