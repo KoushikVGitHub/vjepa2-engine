@@ -28,9 +28,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 STEPS=${STEPS:-2000}
 SAVE_EVERY=${SAVE_EVERY:-2000}
 SEED=${SEED:-0}
-BATCH=${BATCH:-32}            # per-GPU; *2 GPUs = global 64 (>= 32-dim floor). patch-8 peaks ~15.2GB/GPU.
+BATCH=${BATCH:-48}            # per-GPU; *2 GPUs = global 96 (matches Phase 0 control, rank ~35). 4090: batch 48 peaks ~23.7GB/GPU. (A4000 16GB: set BATCH=32 -> global 64.)
+PEAK=${PEAK:-165}             # peak TFLOPS for MFU reporting: 165 (RTX 4090 bf16), 77 (A4000)
 NBLOCKS=${NBLOCKS:-"4 8 12"}  # mask-ratio sweep (nominal ~25/50/75%)
-C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops 77 --d 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --steps $STEPS --batch $BATCH --save-every $SAVE_EVERY --log-every 100"
+C="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm --ckpt --peak-tflops $PEAK --d 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --steps $STEPS --batch $BATCH --save-every $SAVE_EVERY --log-every 100"
 echo "=== MASK SWEEP: patch-8 ViT-L, n-blocks in [$NBLOCKS], STEPS=$STEPS global-batch=$((BATCH*2)) seed=$SEED ==="
 
 for NB in $NBLOCKS; do
