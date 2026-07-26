@@ -706,7 +706,8 @@ def parse_args():
     p.add_argument("--n-blocks", type=int, default=4,
                    help="number of target blocks (I-JEPA multi-block); 1 = the old single-block "
                         "easy task. 4 blocks of size 4 on a 16x16 grid ~= up to 25%% target.")
-    p.add_argument("--d", type=int, default=768)
+    p.add_argument("--d", "--edim", dest="d", type=int, default=768,
+                   help="encoder width. --edim alias avoids torchrun>=2.7 abbreviation clash with --duplicate-*.")
     p.add_argument("--heads", type=int, default=12)
     p.add_argument("--layers", type=int, default=12)
     p.add_argument("--pred-d", type=int, default=384, help="predictor width (lighter than d)")
