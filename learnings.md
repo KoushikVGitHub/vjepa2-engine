@@ -187,6 +187,21 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   what rank alone bought? Needs code (conv-stem patch-embed + circular padding). Phase 0 must precede it so the conv-stem's
   Ω_m payoff isn't re-confounded with batch/rank.
 
+**L15 — Phase 0 execution on 2× RTX 4090 24 GB (2026-07-26, VERDICT PENDING).**
+- **Pod/infra:** fresh image has **tmux NOT preinstalled** (`apt-get install -y tmux`). Same *persisted* `/workspace`
+  volume survives (all ckpts + `data/` corpus intact). The `runpod_auto` pubkey must be **re-added to
+  `~/.ssh/authorized_keys` on every new pod** (the passphrased `id_ed25519` can't be used non-interactively).
+- **VRAM reality (corrects L13's guess):** patch-8 **batch 64/GPU OOMs a 24 GB card** (tried to alloc ~4 GB over) —
+  the L13 "batch 64/GPU fits 24 GB → rank ~72" estimate was **WRONG**. **batch 48/GPU fits** at ~23.7 GB/GPU
+  (~0.8 GB headroom) ⇒ **global 96** (not 128) ⇒ rank ~37–53, still clears the 32-dim floor with margin.
+- **2-GPU health tell on 4090 (no NVLink):** `NCCL_P2P_DISABLE=1` required; healthy = 100% util **at ~410 W/GPU**
+  (near the 450 W TDP). The NCCL hang looks identical on util (100%) but draws only ~55% TDP — **power draw, not
+  util, is the diagnostic.**
+- **Early rank climb (global 96):** eff_rank **1.8 → 13.6 by step 100** (cov still 20.9 → still rising), already
+  tracking to beat the global-64 run's ~25 plateau. Rate ~2.3 s/step → 4000 steps ≈ 2.5 h + ~15 min probe.
+- **VERDICT PENDING:** probe ladder (steps 2000/4000) runs after training. Ω_m > ~0.70 ⇒ rank-limited (L13 right);
+  Ω_m ~0.63 at rank ~45 ⇒ tokenizer-limited ⇒ **conv-stem (Phase 2)**. [fill Ω_m/σ8 numbers on completion]
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
