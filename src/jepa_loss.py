@@ -38,6 +38,7 @@ The `__main__` block runs a synthetic empirical test to prove that both the stop
 and SIGReg successfully keep `tgt_std` healthy, while a symmetric model without SIGReg crashes.
 """
 import copy
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -117,6 +118,50 @@ def random_block_mask(grid: int, block: int, device, n_blocks: int = 1):
 
 
 # --------------------------------------------------------------------------- tiny ViT pieces
+class ConvStem(nn.Module):
+    """
+    Overlapping convolutional tokenizer with CIRCULAR padding (Phase-2 lever).
+
+    Behavior:
+        Replaces the linear patch-embed with a stack of stride-2 3x3 convolutions that
+        downsample an (B, 1, img, img) field to (B, grid*grid, d) tokens (grid = img // patch),
+        the SAME token layout the linear embed produces -- so positional embeddings, the
+        predictor, and every downstream module are byte-for-byte unchanged. Requires a
+        power-of-2 `patch` (8 -> 3 stride-2 layers, 16 -> 4).
+
+    Role in Program:
+        The linear patch-embed flattens each DISJOINT patch and linearly mixes it -- that is
+        a box-average that band-limits high spatial frequency, and Phase-0/1 showed it caps
+        Omega_m (a high-k / 2-point quantity) at ~0.60 vs the pk-floor 0.818. The stacked
+        convs have OVERLAPPING receptive fields spanning patch boundaries, preserving the
+        small-scale power Omega_m needs. Padding is CIRCULAR because CAMELS maps are periodic
+        simulation boxes -- zero/reflect padding would inject a spurious non-periodic edge.
+    """
+
+    def __init__(self, patch, d, in_ch=1):
+        super().__init__()
+        nlayers = int(round(math.log2(patch)))
+        if 2 ** nlayers != patch:
+            raise ValueError(f"conv-stem needs a power-of-2 patch, got {patch}.")
+        # channel schedule doubles up to the embed dim: patch8/d1024 -> [1,128,256,512],
+        # patch16/d1024 -> [1,64,128,256,512]; last stride-2 output is d//2, then a 1x1 to d.
+        chs = [in_ch] + [d // (2 ** (nlayers - i)) for i in range(nlayers)]
+        layers = []
+        for i in range(nlayers):
+            layers += [
+                nn.Conv2d(chs[i], chs[i + 1], kernel_size=3, stride=2, padding=1,
+                          padding_mode="circular"),
+                nn.GroupNorm(1, chs[i + 1]),   # LayerNorm-equivalent; no running stats (FSDP/bf16-safe, unlike BN)
+                nn.GELU(),
+            ]
+        layers += [nn.Conv2d(chs[-1], d, kernel_size=1)]   # 1x1 project last conv channels -> embed dim
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):                       # (B,1,H,W) -> (B, grid*grid, d)
+        x = self.net(x)                         # (B, d, grid, grid)
+        return x.flatten(2).transpose(1, 2)     # (B, grid*grid, d), row-major = matches linear patchify order
+
+
 class ViTEncoder(nn.Module):
     """
     A minimal Vision Transformer (ViT) encoder for patchified images.
@@ -132,11 +177,20 @@ class ViTEncoder(nn.Module):
         the target encoder) mapped to the image space.
     """
 
-    def __init__(self, img=16, patch=4, d=64, heads=4, layers=2):
+    def __init__(self, img=16, patch=4, d=64, heads=4, layers=2, stem="linear"):
         super().__init__()
         self.grid = img // patch
         self.n = self.grid ** 2
-        self.proj = nn.Linear(patch * patch, d)
+        self.stem = stem
+        # Tokenizer: "linear" = the original disjoint-patch linear embed (default, band-limits
+        # high-k); "conv" = overlapping circular conv-stem (Phase-2 high-k lever). Only one is
+        # built, so a checkpoint carries exactly the keys for the stem it was trained with.
+        if stem == "linear":
+            self.proj = nn.Linear(patch * patch, d)
+        elif stem == "conv":
+            self.conv_stem = ConvStem(patch, d)
+        else:
+            raise ValueError(f"unknown stem {stem!r} (expected 'linear' or 'conv').")
         self.pos = nn.Parameter(torch.randn(self.n, d) * 0.02)
         layer = nn.TransformerEncoderLayer(d, heads, d * 2, batch_first=True, dropout=0.0)
         self.blocks = nn.TransformerEncoder(layer, layers)
@@ -150,7 +204,10 @@ class ViTEncoder(nn.Module):
         return x
 
     def forward(self, x, keep=None):
-        tok = self.proj(self.patchify(x)) + self.pos     # (B, n, d)
+        if self.stem == "linear":
+            tok = self.proj(self.patchify(x)) + self.pos # (B, n, d)
+        else:
+            tok = self.conv_stem(x) + self.pos           # (B, n, d), conv tokenizer
         if keep is not None:
             tok = tok[:, keep]                           # context = subset (keeps its pos)
         return self.blocks(tok)

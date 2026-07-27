@@ -86,6 +86,9 @@ def main():
     ap.add_argument("--enc-d", type=int, default=ENC["d"])
     ap.add_argument("--enc-heads", type=int, default=ENC["heads"])
     ap.add_argument("--enc-layers", type=int, default=ENC["layers"])
+    ap.add_argument("--stem", choices=["linear", "conv"], default="linear",
+                    help="tokenizer -- MUST match how the checkpoint was trained ('conv' checkpoints "
+                         "carry conv_stem.* keys, 'linear' carry proj.*).")
     ap.add_argument("--seed", type=int, default=0, help="seed for deterministic probe (head init + shuffle)")
     ap.add_argument("--suite", default="IllustrisTNG", help="in-suite (pretraining) suite")
     ap.add_argument("--heldout", default="SIMBA", help="cross-suite robustness suite (if on disk)")
@@ -108,7 +111,8 @@ def main():
     # Build the encoder config from the CLI so a patch-8 / downscaled checkpoint loads cleanly.
     # NB: use a distinct name (not ENC) -- assigning ENC here would shadow the module-level ENC
     # for all of main(), breaking the argparse `default=ENC[...]` reads above (UnboundLocalError).
-    enc_cfg = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads, layers=args.enc_layers)
+    enc_cfg = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads,
+                   layers=args.enc_layers, stem=args.stem)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

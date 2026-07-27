@@ -261,6 +261,33 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
 - **Reminder:** before the SIMBA cross-suite download (Phase 3), bump `/workspace` storage to ~150 GB (currently
   60 G of the 75 GB quota — SIMBA is another ~53 GB and will not fit).
 
+**L17 — Phase 2 (conv-stem tokenizer) STAGED 2026-07-27 — code ready, no pod used yet.**
+- **Thesis:** Ω_m is capped at ~0.60 vs pk-floor 0.818 because the **linear** patch-8 embed (`nn.Linear(patch*patch, d)`
+  on *disjoint* patches) is a box-average that band-limits high-k. Fix = an overlapping conv tokenizer that spans
+  patch boundaries. σ8 is already past the 2-pt floor (0.388 > 0.331) so this phase targets **Ω_m only**.
+- **Flag: `--stem {linear,conv}`** (default `linear`). New `ConvStem` in `src/jepa_loss.py` = `log2(patch)` stride-2
+  3×3 convs (patch-8 → 3 layers, channels 1→128→256→512) + GroupNorm + GELU, then a 1×1 conv → d, with
+  **`padding_mode="circular"`** because CAMELS maps are periodic boxes (zero/reflect padding would inject a fake
+  edge). Output is the SAME (B, grid², d) token grid in the same row-major order → pos-embed / predictor / probe all
+  unchanged. GroupNorm not BatchNorm (BN running-stats are an FSDP+bf16 hazard, same reason as the VISReg projector).
+- **Default-off is bit-identical:** when `stem="linear"` only `self.proj` is built (conv branch never constructed),
+  RNG draw order is unchanged, and the state_dict carries exactly the legacy keys (`proj/pos/blocks`) → **existing
+  m4/m8/m12 checkpoints still load.** Conv checkpoints carry disjoint `conv_stem.*` keys (no collision).
+- **Wired through:** `src/train_fsdp.py` (`--stem` arg → `build_model` → `ViTEncoder`), `scripts/run_probe.py`
+  (`--stem` arg → `enc_cfg` → `load_frozen_encoder`, which passes `**enc_kw` straight through — no edit needed in
+  `src/probe.py`). Probe `--stem` MUST match how the ckpt was trained.
+- **Verified on CPU** (`scripts/test_conv_stem.py`, all green): token shapes match, linear path bit-identical +
+  legacy-keys-only, conv keys disjoint, both stems deterministic, **circular equivariance holds** (periodic shift of
+  the input rolls the token grid by one column, max err 8e-07), and both stems run masked-forward + a full JEPA step.
+  (Test uses real stem geometry — 1024 tokens, d=1024 — but shallow layers: torch's **CPU** build segfaults on the
+  true 24-layer attention; transformer depth is irrelevant to tokenizer shape-compat.)
+- **Phase-2 launch = `scripts/phase2_convstem.sh`** (controlled A/B: trains BOTH stems at identical
+  steps/batch/seed=0, n-blocks=4 fixed, then probes each). **Needs a 24–32 GB 2-GPU pod** (batch 48/GPU → global 96
+  for rank parity; A4000 16 GB can't *train* this). Launch:
+  `tmux new-session -d -s p2 "bash /workspace/scripts/phase2_convstem.sh > /workspace/logs/p2.log 2>&1"`.
+  Read: conv Ω_m rising toward 0.818 ⇒ tokenizer band-limiting confirmed+fixed (adopt conv for Phase 3);
+  flat near 0.60 ⇒ ceiling is capacity/data, not the tokenizer.
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
