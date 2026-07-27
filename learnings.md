@@ -216,20 +216,37 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   architectural. Next = build the conv-stem + circular-padding ViT (Phase 2), NOT more batch/rank.** Reusable
   rank-matched control ckpt: `ckpt_p8_b128_step3000.pt`.
 
-**L16 — Phase 1 (mask sweep) PAUSED 2026-07-26 — ALL 3 ARMS TRAINED, only the σ8 PROBES remain.**
-- **All three mask arms are trained and saved** to `/workspace/checkpoints/` (844 MB each, valid, seed 0, patch-8
-  recipe, global batch 96 = batch 48/GPU, STEPS=2000): `ckpt_m4.pt` (~25% mask, eff_rank 35.1 = Phase-0 control ✓),
-  `ckpt_m8.pt` (~50%), `ckpt_m12.pt` (~75%, eff_rank ended ~34.5 — rank parity holds across all three). m4/m8 ran
-  on 2× RTX 4090; m12 ran on 2× RTX PRO 4500 (Blackwell). The `/workspace` network volume persists across pod
-  stop and across *different* pods (verified: same volume re-attached on a new IP).
-- **RESUME = PROBES ONLY (no retraining).** Just probe each `ckpt_m{4,8,12}.pt` for σ8 → report the σ8-vs-mask
-  curve → state the lever verdict. **No σ8 numbers exist yet.** Probe cmd (per arm):
-  `python scripts/run_probe.py --ckpt $CKPT/ckpt_m<NB>.pt --field Mgas --img 256 --patch 8 --enc-d 1024
-  --enc-layers 24 --enc-heads 16 --no-atlas --seed 0`. **Run them SEQUENTIALLY, not parallel** — patch-8 probes
-  are DataLoader-bound (~6 cores each, GPU mostly idle, ~30–50 min each); two in parallel just halve throughput
-  with no speedup and drag to ~50 min. Ready-made: `scripts/phase1_resume.sh` on the pod (edit it to skip the m12
-  train block since m12 is done — or just run the 3 probe lines). Compare σ8 R² vs the **0.390** baseline (m4 must
-  reproduce it) and pk-floor 0.331. Monotone rise m4→m8→m12 ⇒ masking is a real lever; flat/declining ⇒ saturated.
+**L16 — Phase 1 (mask sweep) COMPLETE 2026-07-27 — VERDICT: SATURATED, mask ratio is NOT a σ8 lever.**
+- All three mask arms trained and saved to `/workspace/checkpoints/` (844 MB each, seed 0, patch-8 recipe, global
+  batch 96 = batch 48/GPU, STEPS=2000): `ckpt_m4.pt` (~25% mask, eff_rank 35.1 = Phase-0 control ✓), `ckpt_m8.pt`
+  (~50%), `ckpt_m12.pt` (~75%, eff_rank ~34.5 — rank parity holds across all three). m4/m8 trained on 2× RTX 4090;
+  m12 on 2× RTX PRO 4500. `/workspace` network volume persists across pod stop AND across *different* pods
+  (verified 3×: re-attached same checkpoints on new IPs / new GPU types).
+- **RESULT — σ8-vs-mask curve** (Mgas in-suite R² on IllustrisTNG, patch-8 ViT-L, seed 0), probed on 2× RTX A4000:
+
+  | n-blocks (~mask %) | Ω_m R² | σ8 R² |
+  |---|---|---|
+  | 4  (~25%) | 0.577 | 0.384 |
+  | 8  (~50%) | 0.516 | 0.376 |
+  | 12 (~75%) | 0.604 | 0.388 |
+  | pk-alone floor | 0.818 | 0.331 |
+
+- **VERDICT — SATURATED.** σ8 = 0.384 → 0.376 → 0.388 is **non-monotone and flat** (whole spread 0.011 = noise);
+  no rise with harder masking. Per the pre-registered rule (monotone rise above 0.390 ⇒ lever; flat/declining ⇒
+  saturated ⇒ keep n-blocks=4), **mask *ratio* is not the non-Gaussian lever → keep n-blocks=4 for the conv-stem
+  (Phase 2).** σ8 stays ~0.38 (> pk-floor 0.331) regardless of ratio: the non-Gaussian signal comes from the
+  patch-8 tokenizer, not from masking amount. Ω_m stays far below the 0.818 pk-floor at every ratio — reconfirms
+  Phase-0 tokenizer-limit. NOTE: Track-3 step 2 (L249+) distinguishes mask *ratio* (tested here, dead) from mask
+  *geometry* (contiguous `8×1` vs scattered `4×4`, same ratio) — geometry is the untested lever; revisit only if
+  the conv-stem's σ8 also refuses to move.
+- **⚠ PROBE-SPEED LESSON (corrects the old "run probes sequentially" note).** The earlier "probes are DataLoader-
+  bound, ~30–50 min, parallel halves throughput" diagnosis was WRONG about the cause: `run_probe.py` defaults to
+  **`--workers 4`**, which starves the frozen-feature precompute (GPU sits at 0% util / 16 W while it waits on 4
+  loader procs). On a 128-core pod, `--workers 32` alone takes the GPU to 100%; and because the box has cores to
+  spare, running two probes **in parallel on the two GPUs** (m4→GPU0, m8→GPU1) is a genuine ~2× win, not a wash.
+  Fixed sweep script `scripts/phase1_probes.sh` (scp'd to pod): WAVE1 = m4+m8 parallel @32 workers, WAVE2 = m12
+  @48. Whole 3-arm sweep ran in ~45 min vs the old ~2–2.5 h estimate. Probe cmd unchanged (features are
+  deterministic — shuffle off, augment off — so worker count changes speed only, never the numbers).
 - **⚠ BLACKWELL (sm_120) POD SETUP — the stock RunPod image FAILS on Blackwell and must be patched first:**
   the image ships `torch 2.4.1+cu124` whose archs stop at sm_90 → any CUDA kernel dies with "no kernel image for
   sm_120". Fix (driver 580 already supports it): `pip install --upgrade --index-url
