@@ -1,5 +1,8 @@
 # vjepa2-engine
 
+[![tests](https://github.com/KoushikVGitHub/vjepa2-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/KoushikVGitHub/vjepa2-engine/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **A from-scratch, dataset-agnostic engineering pipeline for self-supervised world-models:** data curation at scale → distributed training with principled anti-collapse (LeJEPA / SIGReg) → optimized inference. The three things a world-model lab runs every day, built end to end and benchmarked with logged numbers.
 
 > Self-supervised models live or die on infrastructure: how fast you can curate the data, how efficiently you shard a model across GPUs without it collapsing, and how cheaply you can serve it. This repo builds and benchmarks that engineering surface. The engine is **dataset-agnostic** — the loss, the distributed SIGReg, and the FSDP trainer don't change with the data; only the loader and input dims do.
@@ -61,6 +64,29 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 - **Curation is a *policy*, not a constant** — rejection thresholds read off the empirical distribution's tail; disk-cached manifests make reruns instant and turn N re-scans into 1.
 - **Collapse is monitored, not hoped for** — target-std *and* effective rank are logged every run. That caught a *dimensional* collapse hiding behind a perfectly healthy target-std, and fixing it lifted the probe 2.2× ([the debugging story](study/notes/collapse_resolution.md), including why the loss going **up 150×** meant the model got healthier).
 
+## Correctness gates (CI)
+
+Every claim above rests on properties that fail *silently* — a broken all-reduce still trains,
+a non-circular pad still converges, a blind regularizer still logs a healthy loss. So the ones
+that can be checked without a GPU are checked on every push (`pytest`, ~11 s, CPU-only):
+
+| Gate | What would otherwise break unnoticed |
+|---|---|
+| `tests/test_distributed_sigreg.py` | **world=2 × batch-B ≡ world=1 × batch-2B**, over gloo on CPU — the same invariant `src/sigreg.py --verify` gates on 2 GPUs over NCCL. Reduce the ECF sums *after* the nonlinearity instead of before, or lose differentiability through the collective, and training silently optimizes a different objective. |
+| `tests/test_anticollapse.py` | The repo's central finding, as an executable claim: on a rank-2-of-64 batch whose per-dim std is a healthy 1.00, SIGReg's gradient measures **2.3e-4** while the covariance penalty's is **0.25 (~1000×)**. This is *why* `--var-coef/--cov-coef` exist and why `eff_rank` — not `tgt_std` — is the detector that matters. |
+| `tests/test_conv_stem.py` | Phase-2 tokenizer stays a drop-in: identical token grid, bit-identical linear path, legacy checkpoint keys intact, and padding genuinely circular (periodic-shift equivariance to 8e-7) — CAMELS boxes are periodic, so a zero/reflect pad would fabricate an edge in exactly the high-k signal the conv stem exists to preserve. |
+| `tests/test_sigreg.py` | The objective is ~0 for N(0,I), large under collapse, penalizes mis-scaling, and is bit-reproducible under a seeded generator — the property distributed correctness depends on. |
+| `tests/test_masking.py` | Context/target partition is disjoint and exhaustive, blocks are contiguous, context is never empty at the trained default (n-blocks=4, block=8, 32×32). |
+| `tests/test_jepa.py` | Mode wiring: the EMA teacher is built **only** where the mode needs one (allocating it in lejepa/visreg wastes a full encoder of dead memory per GPU), the teacher is frozen, `stop_grad` really does sever the target, and collapse detectors land in range. |
+
+```bash
+pip install -r requirements-dev.txt && pytest        # 41 tests, CPU, no data required
+```
+
+The suite needs only `torch` — no `transformers`, no video codecs, no CAMELS download — so it
+stays runnable on a bare runner. One test (`gloo`, world=2) skips on Windows, where gloo cannot
+create a device; it runs on the Linux CI matrix (3.10 / 3.12).
+
 ## Repository layout
 
 ```
@@ -74,6 +100,7 @@ scripts/        # production drivers
   run_probe.py    train + evaluate the cosmology probe on a frozen checkpoint
   rank_report.py  representation-geometry report: token vs pooled effective rank, PCA, ridge probe
   analyze_all.py  per-field statistics -> curation thresholds (see study/notes/camels_field_stats.md)
+tests/          # CPU correctness gates, run in CI on every push (see Correctness gates)
 study/          # the from-scratch fundamentals — imports the library from src/, nothing here is imported back
   collapse_study.py       synthetic study: stop-grad vs EMA vs SIGReg (what actually stops collapse)
   sigreg_demo.py          SIGReg sanity demo (~0 for N(0,I), large for collapsed)
@@ -137,6 +164,9 @@ The engine is dataset-agnostic, so each stage swaps only the loader + input dims
 1. **Stage 1 — CAMELS 2D fields (static, now).** Prove the pipeline end to end on a benchmarked scientific task.
 2. **Stage 2 — CAMELS 3D grids across redshift.** The only registered temporal axis in CAMELS (z = 0, 0.5, 1, 1.5, 2) → genuine spatiotemporal prediction of structure formation over cosmic time.
 3. **Stage 3 — SDOML solar observations.** NASA Solar Dynamics Observatory ML dataset — real *observed* multi-waveband video at scale; forecast-next-frame = world dynamics.
+
+## License
+[Apache-2.0](LICENSE) — free to use, modify, and build on, with an explicit patent grant.
 
 ## Status
 Active engineering build. Not affiliated with Meta or AMI Labs. Demonstrates production-engineering skills for self-supervised world-models: large-scale data curation, distributed training with principled anti-collapse, and inference optimization.

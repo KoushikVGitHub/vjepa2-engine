@@ -1,0 +1,5 @@
+# CI/test dependencies only. The suite is CPU-only and deliberately does NOT need the heavy
+# runtime stack (transformers / decord / av / CAMELS data) -- it gates the engine's math and
+# wiring, so it must stay installable and fast on a bare runner.
+pytest>=8.0
+torch>=2.3

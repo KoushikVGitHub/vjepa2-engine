@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: CPU test suite (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (CPU torch only)
+        # The CPU wheel index keeps this a ~200 MB install instead of pulling the CUDA stack.
+        # The suite intentionally needs nothing else -- no transformers, no video codecs, no data.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Distributed SIGReg gate (gloo, world=2)
+        # Called out as its own step because it is the repo's load-bearing correctness claim:
+        # sharding the batch across ranks must not change the objective. The GPU/NCCL twin of
+        # this runs as `torchrun --nproc_per_node=2 src/sigreg.py --verify`.
+        run: pytest tests/test_distributed_sigreg.py -v
