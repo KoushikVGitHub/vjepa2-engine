@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "src"))
 
 import torch
 import torch.nn as nn
-from jepa_loss import ViTEncoder, ViTPredictor, JEPA, ConvStem, random_block_mask
+from jepa_loss import (ViTEncoder, ViTPredictor, JEPA, ConvStem, MLPStem,
+                       _conv_stem_param_count, random_block_mask)
 
 # REAL Phase-2 stem geometry (patch-8, d-1024 -> 32x32=1024 tokens): this is what the deliverable
 # must get right (token layout, checkpoint keys, circular equivariance). LAYERS/HEADS/B are kept
@@ -82,8 +83,34 @@ def main():
     assert err < 1e-4, f"circular equivariance broken (max err {err:.2e}) -- padding not circular?"
     print(f"[ok] circular padding verified (periodic-shift equivariance, max err {err:.1e})")
 
-    # (6) masked forward + full JEPA step under both stems -------------------
-    for stem_name in ("linear", "conv"):
+    # (6) REVIEWER CONTROLS ---------------------------------------------------
+    # H1: MLP stem is param-matched to the conv stem (within ~2%) and same token shape
+    conv_p = _conv_stem_param_count(PATCH, D)
+    mlp = MLPStem(PATCH, D)
+    mlp_p = sum(p.numel() for p in mlp.parameters())
+    assert abs(mlp_p - conv_p) / conv_p < 0.03, f"MLPStem not param-matched: {mlp_p} vs conv {conv_p}"
+    xp = ViTEncoder(img=IMG, patch=PATCH, d=D, heads=HEADS, layers=LAYERS, stem="linear").patchify(x)
+    assert mlp(xp).shape == (B, N, D), mlp(xp).shape
+    print(f"[ok] H1 mlp stem param-matched to conv ({mlp_p/1e6:.2f}M vs {conv_p/1e6:.2f}M) + token shape {tuple(mlp(xp).shape)}")
+
+    # H11: conv stem builds with zeros padding and keeps token shape (periodicity ablation)
+    cz = ConvStem(PATCH, D, pad="zeros").eval()
+    assert cz(x).shape == (B, N, D)
+    print(f"[ok] H11 conv-stem pad='zeros' builds + token shape {tuple(cz(x).shape)}")
+
+    # H3: probe_stage='tokenizer' returns RAW tokens (pre-transformer), not the encoded output
+    ec = build("conv")
+    ec.probe_stage = "tokenizer"
+    with torch.no_grad():
+        raw = ec(x)
+        ec.probe_stage = "encoder"
+        enc_out = ec(x)
+    assert raw.shape == enc_out.shape == (B, N, D)
+    assert not torch.equal(raw, enc_out), "tokenizer-stage must differ from encoder-stage output"
+    print(f"[ok] H3 probe_stage='tokenizer' returns pre-transformer tokens {tuple(raw.shape)} (!= encoder stage)")
+
+    # (7) masked forward + full JEPA step under all THREE stems --------------
+    for stem_name in ("linear", "conv", "mlp"):
         enc = build(stem_name)
         pred = ViTPredictor(N, d=D, pred_d=384, heads=6, layers=6)
         jepa = JEPA(enc, pred, loss_mode="lejepa", var_coef=5.0, cov_coef=4e-2, target_norm=True)
@@ -96,7 +123,7 @@ def main():
         n_params = sum(p.numel() for p in enc.parameters()) / 1e6
         print(f"[ok] {stem_name:6s}: masked ctx {tuple(ctx.shape)}, JEPA loss {loss.item():.4f}, enc {n_params:.1f}M params")
 
-    print("\nALL GREEN -- conv-stem is a shape-compatible drop-in; linear path unchanged.")
+    print("\nALL GREEN -- 3 stems shape-compatible; linear path unchanged; H1/H3/H11 controls wired.")
 
 
 if __name__ == "__main__":

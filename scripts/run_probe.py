@@ -86,9 +86,17 @@ def main():
     ap.add_argument("--enc-d", type=int, default=ENC["d"])
     ap.add_argument("--enc-heads", type=int, default=ENC["heads"])
     ap.add_argument("--enc-layers", type=int, default=ENC["layers"])
-    ap.add_argument("--stem", choices=["linear", "conv"], default="linear",
-                    help="tokenizer -- MUST match how the checkpoint was trained ('conv' checkpoints "
-                         "carry conv_stem.* keys, 'linear' carry proj.*).")
+    ap.add_argument("--stem", choices=["linear", "conv", "mlp"], default="linear",
+                    help="tokenizer -- MUST match how the checkpoint was trained (conv->conv_stem.*, "
+                         "mlp->mlp_stem.*, linear->proj.* keys).")
+    ap.add_argument("--stem-pad", choices=["circular", "zeros"], default="circular",
+                    help="conv-stem padding -- MUST match training (only used when --stem conv).")
+    ap.add_argument("--random-init", action="store_true",
+                    help="H7 control: DON'T load the checkpoint -- probe a randomly-initialised frozen "
+                         "encoder. trained_R2 - random_R2 = information the pretext task actually taught.")
+    ap.add_argument("--probe-stage", choices=["encoder", "tokenizer"], default="encoder",
+                    help="H3 control: 'tokenizer' probes the RAW tokenizer output (pre-transformer) to "
+                         "localise where the conv gain lives; 'encoder' (default) probes encoded tokens.")
     ap.add_argument("--seed", type=int, default=0, help="seed for deterministic probe (head init + shuffle)")
     ap.add_argument("--suite", default="IllustrisTNG", help="in-suite (pretraining) suite")
     ap.add_argument("--heldout", default="SIMBA", help="cross-suite robustness suite (if on disk)")
@@ -112,13 +120,15 @@ def main():
     # NB: use a distinct name (not ENC) -- assigning ENC here would shadow the module-level ENC
     # for all of main(), breaking the argparse `default=ENC[...]` reads above (UnboundLocalError).
     enc_cfg = dict(img=args.img, patch=args.patch, d=args.enc_d, heads=args.enc_heads,
-                   layers=args.enc_layers, stem=args.stem)
+                   layers=args.enc_layers, stem=args.stem, stem_pad=args.stem_pad)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    enc = load_frozen_encoder(args.ckpt, device, **enc_cfg)
+    enc = load_frozen_encoder(args.ckpt, device, random_init=args.random_init, **enc_cfg)
+    enc.probe_stage = args.probe_stage            # H3: read raw tokenizer output when "tokenizer"
     n_enc = sum(p.numel() for p in enc.parameters())
-    print(f"[probe] frozen encoder loaded: {n_enc / 1e6:.1f}M params (ViT-L, {enc_cfg})")
+    tag = "RANDOM-INIT" if args.random_init else "trained"
+    print(f"[probe] {tag} encoder ({args.probe_stage} stage): {n_enc / 1e6:.1f}M params (ViT-L, {enc_cfg})")
 
     ds = make_dataset(args.data_root, args.field, args.suite)
     tr_idx, va_idx, te_idx = sim_split(len(ds))

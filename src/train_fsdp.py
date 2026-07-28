@@ -175,7 +175,7 @@ def build_model(args, device):
     """
 
     enc = ViTEncoder(img=args.img, patch=args.patch, d=args.d,
-                      heads=args.heads, layers=args.layers, stem=args.stem)
+                      heads=args.heads, layers=args.layers, stem=args.stem, stem_pad=args.stem_pad)
     grid = args.img // args.patch
     # multicrop uses NO predictor -> don't build/FSDP-wrap dead params (unused submodule under
     # FULL_SHARD can stall the backward reduce-scatter). The masked paths need it.
@@ -702,9 +702,12 @@ def parse_args():
     p.add_argument("--ckpt", action="store_true", help="activation checkpointing")
     p.add_argument("--img", type=int, default=256, help="CAMELS 2D maps are 256x256")
     p.add_argument("--patch", type=int, default=16)
-    p.add_argument("--stem", choices=["linear", "conv"], default="linear",
-                   help="tokenizer: 'linear' = disjoint-patch linear embed (default, band-limits high-k); "
-                        "'conv' = overlapping circular conv-stem (Phase-2 high-k lever for Omega_m).")
+    p.add_argument("--stem", choices=["linear", "conv", "mlp"], default="linear",
+                   help="tokenizer: 'linear' = disjoint-patch linear embed (default); 'conv' = overlapping "
+                        "conv-stem (Phase-2 winner); 'mlp' = param-matched disjoint-patch MLP (H1 control).")
+    p.add_argument("--stem-pad", choices=["circular", "zeros"], default="circular",
+                   help="conv-stem padding (only used when --stem conv): 'circular' = periodic (default), "
+                        "'zeros' = H11 ablation isolating the periodicity contribution.")
     p.add_argument("--block", type=int, default=4, help="target block size on the patch grid")
     p.add_argument("--n-blocks", type=int, default=4,
                    help="number of target blocks (I-JEPA multi-block); 1 = the old single-block "

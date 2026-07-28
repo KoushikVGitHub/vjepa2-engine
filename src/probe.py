@@ -32,7 +32,7 @@ TARGET_STD = (0.1, 0.1)
 
 
 # --------------------------------------------------------------------- frozen encoder
-def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
+def load_frozen_encoder(ckpt_path: str, device, random_init: bool = False, **enc_kw) -> nn.Module:
     """
     Instantiates the ViT encoder and loads pretrained FSDP/DDP weights.
 
@@ -42,11 +42,22 @@ def load_frozen_encoder(ckpt_path: str, device, **enc_kw) -> nn.Module:
         and loads them. Sets to eval mode and freezes all parameters. Refuses to proceed
         if any encoder parameter was not populated (guards a silently-random encoder).
 
+        `random_init=True` (reviewer hole H7) SKIPS loading entirely and returns a frozen
+        randomly-initialised encoder -- the control whose probe R2 is the "learned nothing"
+        floor; trained_R2 - random_R2 is the information the pretext task actually taught.
+
     Role in Program:
         Provides the fixed representation extractor. The JEPA encoder has finished
         learning; this function prepares it to embed data for the downstream probe.
     """
     encoder = ViTEncoder(**enc_kw).to(device)
+
+    if random_init:
+        # Deliberately DON'T load the checkpoint -- freeze the random init as the H7 baseline.
+        encoder.eval()
+        for param in encoder.parameters():
+            param.requires_grad_(False)
+        return encoder
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)  # bundles an args dict
     # Accept either a bare state_dict or a {"model": state_dict, ...} training checkpoint.

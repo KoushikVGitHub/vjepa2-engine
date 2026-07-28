@@ -130,15 +130,19 @@ class ConvStem(nn.Module):
         power-of-2 `patch` (8 -> 3 stride-2 layers, 16 -> 4).
 
     Role in Program:
-        The linear patch-embed flattens each DISJOINT patch and linearly mixes it -- that is
-        a box-average that band-limits high spatial frequency, and Phase-0/1 showed it caps
-        Omega_m (a high-k / 2-point quantity) at ~0.60 vs the pk-floor 0.818. The stacked
-        convs have OVERLAPPING receptive fields spanning patch boundaries, preserving the
-        small-scale power Omega_m needs. Padding is CIRCULAR because CAMELS maps are periodic
-        simulation boxes -- zero/reflect padding would inject a spurious non-periodic edge.
+        HYPOTHESIS under test (Phase 2): the linear patch-embed sees each DISJOINT patch in
+        isolation, so cross-patch-boundary structure is severed and must be reassembled by the
+        transformer, and the single linear layer is a weak per-token feature extractor. The
+        conv-stem's stride-2 convs have OVERLAPPING receptive fields spanning patch boundaries
+        plus hierarchical nonlinearity -- a stronger inductive bias for spatially-stationary
+        cosmology statistics. NB the linear embed is a FULL Linear(patch^2 -> d), i.e. lossless
+        within a patch, NOT a box-average -- so "band-limiting" is a loose label; the reviewer
+        controls (--stem mlp param-matched, --stem-pad zeros, raw-tokenizer probe) exist to
+        separate overlap/periodicity/capacity as the true cause. Padding defaults CIRCULAR
+        because CAMELS boxes are periodic; `pad="zeros"` is the H11 ablation.
     """
 
-    def __init__(self, patch, d, in_ch=1):
+    def __init__(self, patch, d, in_ch=1, pad="circular"):
         super().__init__()
         nlayers = int(round(math.log2(patch)))
         if 2 ** nlayers != patch:
@@ -150,7 +154,7 @@ class ConvStem(nn.Module):
         for i in range(nlayers):
             layers += [
                 nn.Conv2d(chs[i], chs[i + 1], kernel_size=3, stride=2, padding=1,
-                          padding_mode="circular"),
+                          padding_mode=pad),
                 nn.GroupNorm(1, chs[i + 1]),   # LayerNorm-equivalent; no running stats (FSDP/bf16-safe, unlike BN)
                 nn.GELU(),
             ]
@@ -160,6 +164,36 @@ class ConvStem(nn.Module):
     def forward(self, x):                       # (B,1,H,W) -> (B, grid*grid, d)
         x = self.net(x)                         # (B, d, grid, grid)
         return x.flatten(2).transpose(1, 2)     # (B, grid*grid, d), row-major = matches linear patchify order
+
+
+def _conv_stem_param_count(patch, d, in_ch=1):
+    """Param count of ConvStem(patch, d) -- used to size the param-matched MLPStem control."""
+    return sum(p.numel() for p in ConvStem(patch, d, in_ch).parameters())
+
+
+class MLPStem(nn.Module):
+    """
+    Param-matched CONTROL for the conv-stem (reviewer hole H1).
+
+    A 2-layer MLP applied to each flattened DISJOINT patch (same patchify as the linear embed,
+    NO cross-patch overlap), with hidden width chosen so its parameter count ~matches ConvStem.
+    Purpose: if MLPStem ~= linear and conv >> both, the conv gain is OVERLAP / periodicity /
+    inductive-bias -- NOT merely the extra capacity+nonlinearity of a bigger tokenizer. It emits
+    the same (B, n, d) token layout, so it is a drop-in third stem.
+    """
+
+    def __init__(self, patch, d, match_params=None):
+        super().__init__()
+        pp = patch * patch
+        if match_params is None:
+            match_params = _conv_stem_param_count(patch, d)
+        # params ~= h*pp + h + h*d + d ; solve h to match ConvStem's count (floor at d).
+        h = max(d, round((match_params - d) / (pp + d + 1)))
+        self.net = nn.Sequential(nn.Linear(pp, h), nn.GELU(), nn.Linear(h, d))
+        self.hidden = h
+
+    def forward(self, x):                       # (B, n, patch*patch) -> (B, n, d)
+        return self.net(x)
 
 
 class ViTEncoder(nn.Module):
@@ -177,20 +211,26 @@ class ViTEncoder(nn.Module):
         the target encoder) mapped to the image space.
     """
 
-    def __init__(self, img=16, patch=4, d=64, heads=4, layers=2, stem="linear"):
+    def __init__(self, img=16, patch=4, d=64, heads=4, layers=2, stem="linear", stem_pad="circular"):
         super().__init__()
         self.grid = img // patch
         self.n = self.grid ** 2
         self.stem = stem
-        # Tokenizer: "linear" = the original disjoint-patch linear embed (default, band-limits
-        # high-k); "conv" = overlapping circular conv-stem (Phase-2 high-k lever). Only one is
-        # built, so a checkpoint carries exactly the keys for the stem it was trained with.
+        # `probe_stage` (settable, default "encoder") lets the frozen probe read the RAW tokenizer
+        # output (pre-transformer) instead of the encoded tokens -- reviewer hole H3, localises
+        # where the conv gain lives. It only affects eval-time forward; training never sets it.
+        self.probe_stage = "encoder"
+        # Tokenizer: "linear" = original disjoint-patch linear embed (default); "conv" = overlapping
+        # conv-stem (Phase-2 winner, pad = circular|zeros); "mlp" = param-matched disjoint-patch MLP
+        # (H1 control). Only one is built, so a checkpoint carries exactly that stem's keys.
         if stem == "linear":
             self.proj = nn.Linear(patch * patch, d)
         elif stem == "conv":
-            self.conv_stem = ConvStem(patch, d)
+            self.conv_stem = ConvStem(patch, d, pad=stem_pad)
+        elif stem == "mlp":
+            self.mlp_stem = MLPStem(patch, d)
         else:
-            raise ValueError(f"unknown stem {stem!r} (expected 'linear' or 'conv').")
+            raise ValueError(f"unknown stem {stem!r} (expected 'linear' | 'conv' | 'mlp').")
         self.pos = nn.Parameter(torch.randn(self.n, d) * 0.02)
         layer = nn.TransformerEncoderLayer(d, heads, d * 2, batch_first=True, dropout=0.0)
         self.blocks = nn.TransformerEncoder(layer, layers)
@@ -203,13 +243,19 @@ class ViTEncoder(nn.Module):
         x = x.contiguous().view(B, self.n, p * p)
         return x
 
-    def forward(self, x, keep=None):
+    def _tokens(self, x):                                # (B,1,H,W) -> (B, n, d) stem tokens + pos
         if self.stem == "linear":
-            tok = self.proj(self.patchify(x)) + self.pos # (B, n, d)
-        else:
-            tok = self.conv_stem(x) + self.pos           # (B, n, d), conv tokenizer
+            return self.proj(self.patchify(x)) + self.pos
+        elif self.stem == "mlp":
+            return self.mlp_stem(self.patchify(x)) + self.pos
+        return self.conv_stem(x) + self.pos              # conv
+
+    def forward(self, x, keep=None):
+        tok = self._tokens(x)                            # (B, n, d)
         if keep is not None:
             tok = tok[:, keep]                           # context = subset (keeps its pos)
+        if self.probe_stage == "tokenizer":
+            return tok                                   # H3: raw tokenizer output, pre-transformer
         return self.blocks(tok)
 
 
