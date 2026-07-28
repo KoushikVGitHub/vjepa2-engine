@@ -33,23 +33,27 @@ Built as a focused engineering intensive. Method credibility (from-scratch JEPA 
 
 **Goal.** Freeze the pretrained JEPA encoder and ask a direct question: *did label-free self-supervised pretraining actually learn cosmology?* Train only a small moment head on the frozen features to predict (Ω_m, σ8), and compare against the supervised CMD `o3_err` CNN benchmark — in-suite (IllustrisTNG) vs held-out suite (SIMBA) to test cross-simulation robustness.
 
-**Achieved so far.** The pipeline runs end to end — raw fields → curated → trained at scale → served → probed — and label-free pretraining demonstrably learns cosmology. On a **single field (Mgas)** with a **1000-step (still under-trained) checkpoint**:
+**Achieved so far.** The pipeline runs end to end — raw fields → curated → trained at scale → served → probed — and label-free pretraining demonstrably learns cosmology. The investigation has moved well past the original 1000-step smoke run (Ω_m R² 0.50): the encoder is now trained to convergence, the tokenizer has been isolated as the Ω_m bottleneck, and the mask-ratio lever has been ruled out. Current best on a single field (**Mgas**, in-suite IllustrisTNG), frozen **patch-8 ViT-L** encoder:
 
-| | Ω_m | σ8 |
+| frozen probe, Mgas in-suite | Ω_m R² | σ8 R² |
 |---|---|---|
-| **R²** (frozen encoder, attentive probe) | **0.50** | 0.31 |
-| RMSE (physical) | 0.082 | 0.098 |
-| Coverage (0.68 ideal) | 0.56 | 0.56 |
-| *Supervised CMD `o3_err` CNN, RMSE* | *0.025* | *0.045* |
+| **patch-8 ViT-L (converged, current best)** | **~0.60** | **0.388** |
+| power-spectrum floor (32-number FFT, no learning) | 0.818 | 0.331 |
+| moments (mean/std/skew/kurt, 4-number) | 0.491 | 0.234 |
 
-Ω_m > σ8 is the correct recoverability ordering. We trail the supervised CNN by ~3× — expected for a *frozen, label-free* probe that lacks the supervised model's circular-padding and 8× rot/flip inductive biases; the honest question here is *how close label-free gets*, not whether it wins. Coverage 0.56 means σ is slightly overconfident (the calibration term tightens with training). The probe head's validation loss flattens by epoch 14 while **nothing in pretraining plateaued** — so the ceiling is the *representation*, and encoder steps are the lever.
+**σ8 already clears the power-spectrum floor** (0.388 vs 0.331) — the encoder captures non-Gaussian information a 2-point statistic can't see. **Ω_m does not yet** (~0.60 vs 0.818); Ω_m is almost entirely 2-point-saturated, so matching a power spectrum there is the hard, still-open problem. The diagnosis below traced the remaining Ω_m gap to the *linear* patch tokenizer band-limiting high-k power — the hypothesis Phase 2 is now built to test. Nothing here is overstated: Ω_m is **not** solved, and the conv-stem is a hypothesis under test, not a proven win.
 
-**Next:**
-1. **Is the *pooled* rank the real ceiling?** `eff_rank` is measured over all patch tokens; the probe pools each image to one vector. CAMELS fields are smooth → intra-image tokens are redundant, so pooled rank may be far below the token rank of 38. [`scripts/rank_report.py`](scripts/rank_report.py) measures both on a frozen checkpoint (plus the pooled PCA spectrum and a closed-form ridge on top-k PCs) — this gates whether more steps or a code change is the right spend.
-2. **Scale pretraining** — 1000 steps (~64k samples) is a smoke run; real SSL needs 100k+.
-3. **Probe all 6 parameters** — expect high R² on Ω_m/σ8 and near-zero on the 4 astrophysical nuisance params (as the supervised benchmark shows), which would demonstrate the **astro-insensitivity** that the SSL-cosmology literature explicitly wants.
-4. **Held-out SIMBA** cross-suite robustness eval (normalizing with the training suite's statistics, per the benchmark convention).
-5. **Multi-field input channels** — the strongest published SSL result on CAMELS uses multi-channel input.
+**Phase-by-phase status** (the encoder/tokenizer investigation within Stage 1):
+
+| Phase | What | Status |
+|---|---|---|
+| **0 · Rank / tokenizer disambiguation** | Is the Ω_m plateau rank-limited or architectural? Establish patch-8 vs patch-16. | ✅ **done** — `eff_rank` caps at ≈ 0.55× global-batch and at the ~32-dim intrinsic cosmology dim; clearing the 32-dim floor did **not** move Ω_m ⇒ **tokenizer-limited, not rank-limited**. patch-8 beats patch-16 (Ω_m +45% rel); patch-8 linear tokenizer band-limits high spatial frequency. |
+| **1 · Mask-ratio sweep (σ8 lever?)** | Sweep mask ratio via n-blocks 4/8/12 (≈ 25/50/75%) on the patch-8 ViT-L. | ✅ **done — verdict SATURATED.** σ8 flat/non-monotone (0.384 → 0.376 → 0.388, spread 0.011 = noise) ⇒ mask ratio is **not** a σ8 lever; keep n-blocks=4. σ8 stays above the pk-floor at every ratio; Ω_m stays ~0.52–0.60. |
+| **2 · track 1 — conv-stem tokenizer (code)** | Add `--stem {linear,conv}`: `log2(patch)` stride-2 3×3 convs with **circular padding** (CAMELS boxes are periodic) + GroupNorm/GELU, then 1×1 conv to the embed dim; same token grid out. | ✅ **done + committed** (`844916c`). Default `linear` is byte-identical (legacy checkpoints load unchanged); CPU test verifies shapes, bit-identity, circular equivariance (max err 8e-7), and a full JEPA step on both stems. |
+| **2 · track 2 — train the conv-stem (A/B)** | Train conv vs linear at matched steps/batch/seed on a 24–32 GB 2-GPU pod; report in-suite Ω_m vs the ~0.60 linear baseline and the 0.818 pk-floor. | 🚧 **in progress / next.** Read: conv Ω_m rising toward 0.818 ⇒ tokenizer band-limiting confirmed + fixed; flat near 0.60 ⇒ ceiling is capacity/data, not the tokenizer. |
+| **3 · SIMBA cross-suite transfer** | Frozen IllustrisTNG encoder → held-out SIMBA; the headline robustness claim. | 📋 **planned** — success = retention (SIMBA R² / ITNG R²) beats the power spectrum's retention, a win possible at modest absolute R². |
+
+**Still open (beyond the phase ladder):** probe all 6 parameters (expect near-zero R² on the 4 astrophysical nuisance params — the **astro-insensitivity** the SSL-cosmology literature wants), and multi-field input channels (the strongest published SSL result on CAMELS is multi-channel).
 
 ## Highlights (the parts worth reading)
 - **SIGReg is distributed-friendly by construction** — its anti-collapse regularizer is an expectation over the batch, so at scale you just **all-reduce per-GPU partial statistics** for the global-batch statistic; no cross-device negative-pair gathering (contrast: SimCLR). Shipped with a correctness test: world=2 × batch-B ≡ world=1 × batch-2B in loss *and* gradient.
@@ -122,7 +126,9 @@ python scripts/rank_report.py --ckpt /workspace/ckpt.pt --field Mgas --n 3000
 - [x] **CAMELS Stage-1 training, ViT-L (~210M), FSDP+bf16+LeJEPA:** stable 1000-step keeper; 72 samples/s, 884 ms/step, 12.2 GB/GPU peak, 17% MFU (2× RTX 4000 Ada).
 - [x] **Dimensional collapse diagnosed and fixed:** effective rank **2 → 38.7**, target-std → 0.96. Root cause = SIGReg's marginal test is near-blind to anisotropic collapse (‖∇‖ ≈ 2e-4 vs 1.25 for a covariance penalty); fix = VICReg var/cov at a var-dominant ~125:1 ratio + target LayerNorm. Three failed gates isolated **var = the scale knob, cov = the rank knob**. [`study/notes/collapse_resolution.md`](study/notes/collapse_resolution.md).
 - [x] **Cosmology probe (in-suite, Mgas, 1000-step ckpt):** **Ω_m R² = 0.50**, σ8 = 0.31 — a **2.2× lift** from the rank fix. Label-free pretraining learns cosmology; ~3× off the supervised CNN.
-- [ ] **Pooled-rank diagnostic + 10k-step keeper:** does token rank 38 survive per-image pooling, and does scaling steps lift R² further.
+- [x] **Rank vs tokenizer disambiguated (Phase 0):** `eff_rank` caps at ≈ 0.55× global-batch; clearing the ~32-dim intrinsic floor (rank ~25 → ~35+) left Ω_m flat at ~0.63 ⇒ **tokenizer-limited, not rank-limited**. patch-8 beats patch-16 (Ω_m +45% rel; σ8 0.37 > pk-floor 0.331).
+- [x] **Mask-ratio sweep (Phase 1): SATURATED** — σ8 flat across ~25/50/75% masking (0.384 / 0.376 / 0.388) ⇒ mask ratio is not a σ8 lever; keep n-blocks=4.
+- [ ] **Conv-stem A/B (Phase 2 track 2):** does an overlapping, circular-padded conv tokenizer push Ω_m past ~0.60 toward the 0.818 pk-floor. Code committed (`844916c`); training next.
 - [ ] **ViT-L FSDP sweep:** 4-row ddp/fsdp/fsdp+bf16/fsdp+bf16+ckpt at ViT-L scale (where sharding starts to pay vs the FSDP-neutral ViT-B).
 - [x] **Inference optimization (Stage 4):** latency p50/p99 + throughput + MFU per lever (`study/notes/day5_inference.md`).
 
