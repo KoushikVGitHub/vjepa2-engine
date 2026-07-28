@@ -288,6 +288,21 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
   Read: conv Ω_m rising toward 0.818 ⇒ tokenizer band-limiting confirmed+fixed (adopt conv for Phase 3);
   flat near 0.60 ⇒ ceiling is capacity/data, not the tokenizer.
 
+**L18 — Phase 2 (conv-stem tokenizer) COMPLETE 2026-07-28 — VERDICT: conv-stem is a DECISIVE Ω_m lever. Band-limiting CONFIRMED and FIXED. Adopt conv-stem for Phase 3.**
+- **Result (in-suite Mgas R², patch-8 ViT-L, global-batch 64, seed 0):**
+
+  | stem   | Ω_m R² | Ω_m RMSE | σ8 R² |
+  |--------|--------|----------|-------|
+  | linear | 0.5456 | 0.0787   | 0.3724 |
+  | conv   | **0.7661** | **0.0565** | **0.4196** |
+  | pk-floor | 0.818 | — | 0.331 |
+
+- **Ω_m: +0.22 absolute (0.546→0.766, +40% rel), −28% RMSE.** Conv closes ~80% of the linear→pk gap (gap 0.272 → 0.052). The overlapping stride-2 circular convs recover the high-k power the disjoint linear patch-embed box-averaged away. **The Phase-0 diagnosis (tokenizer-limited, not rank-limited) is now causally confirmed** — swapping ONLY the tokenizer moved Ω_m by 0.22.
+- **σ8 also rose to 0.420** (from 0.372), a new high, further above the pk-floor 0.331 — conv improves non-Gaussian extraction too, not just Ω_m.
+- **The rank caveat resolved in the GOOD direction.** Both arms ran at global-batch 64 (20 GB RTX 4000 Ada cap; batch 32/GPU) → eff_rank plateaued ~21, BELOW the ~35 the batch-96 baseline reached (batch-64 cost the linear arm ~0.06: 0.546 here vs 0.604 at batch 96). But conv beats linear by +0.22 at *matched* rank → the win is unambiguously the TOKENIZER, not a rank artifact. Corollary: **0.766 is a conservative lower bound** — conv at batch 96 (rank ~35) should read higher. Worth a confirmation run on a 24 GB pod, but the verdict doesn't depend on it.
+- **Infra:** pod = 2× RTX 4000 Ada 20 GB @157.157.221.29:24595 (stock torch 2.4.1+cu124, sm_89 → no Blackwell patching). Conv-stem peaks **18.0 GB/GPU @batch 32** (+1.3 GB over linear's 16.7); batch 40 would be tight on 20 GB, batch 48 needs 24 GB+. tmux `p2`, `BATCH=32 PEAK=153`. Both probes ran in parallel one-per-GPU (`--workers 32`, GPUs 100% during precompute — Phase-1 starvation avoided). Both arms `train rc=0`, both probes `rc=0`. Runtime ~7 h wall (2×4000 steps ~3 s/step + parallel probes ~15 min).
+- **⇒ Phase 3 (SIMBA cross-suite transfer) uses the conv-stem encoder** (`ckpt_stem_conv.pt`). The headline metric stays the ITNG→SIMBA retention ratio (SSL vs pk); conv now gives Phase 3 a tokenizer that actually carries high-k Ω_m info into the transfer test. Before the SIMBA download, bump `/workspace` to ~150 GB (still 60 G of 75 GB quota).
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
