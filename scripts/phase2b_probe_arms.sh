@@ -38,7 +38,7 @@ for s in seeds:
     except FileNotFoundError: continue
     m0 = re.search(r"=== IN-SUITE.*?(?==== HELD-OUT|\Z)", t, re.S)   # anchor to in-suite block
     seg = m0.group(0) if m0 else t
-    m = re.search(r"Omega_m=(-?[0-9.]+)\s+sigma8=(-?[0-9.]+)", seg)  # -? : keep negative R2
+    m = re.search(r"R2\s*:\s*Omega_m=(-?[0-9.]+)\s+sigma8=(-?[0-9.]+)", seg)  # R2 line ONLY (block prints RMSE/R2/Coverage); -? keeps neg R2
     if m: om.append(float(m.group(1))); s8.append(float(m.group(2)))
 f = lambda v: (sum(v)/len(v), st.stdev(v) if len(v) > 1 else 0.0)
 if om:
