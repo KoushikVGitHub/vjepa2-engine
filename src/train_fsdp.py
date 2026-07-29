@@ -50,7 +50,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
 )
 
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 
 from jepa_loss import JEPA, ViTEncoder, ViTPredictor, random_block_mask, LOSS_MODES
@@ -462,6 +462,31 @@ def build_dataloader(args, world, rank):
         for config in field_configs
     ])
 
+    # H9 control (--holdout-test-sims): exclude the PROBE's test sims from pretraining so the
+    # frozen encoder never sees the probe test set even UNLABELED. A sim id = one cosmology shared
+    # across every field, so we drop those sims in ALL pooled fields (else the encoder could learn
+    # the structure from a correlated field). Uses the identical sim_split(seed=0) the probe uses,
+    # so the held-out sims match the probe's test split exactly. Requires equal-length keep-all
+    # fields (idx//15 = sim); asserts that so a filtered field can't silently mis-align the offsets.
+    if getattr(args, "holdout_test_sims", False):
+        from probe import sim_split
+        MPS = 15  # maps per sim (CAMELS-LH)
+        nf = len(field_configs)
+        per_field, rem = divmod(len(ds), nf)
+        assert rem == 0, (f"--holdout-test-sims needs equal-length keep-all fields "
+                          f"(len(ds)={len(ds)} not divisible by {nf} fields)")
+        _, _, te_idx = sim_split(per_field, maps_per_sim=MPS, seed=0)
+        te_sims = sorted({int(i) // MPS for i in te_idx})
+        excluded = set()
+        for fi in range(nf):
+            base = fi * per_field
+            for s in te_sims:
+                excluded.update(range(base + s * MPS, base + s * MPS + MPS))
+        kept = [i for i in range(len(ds)) if i not in excluded]
+        rprint(f"[data] H9 holdout: excluded {len(te_sims)} probe-test sims x {nf} fields "
+               f"= {len(excluded)} maps; pretraining on {len(kept)} (was {len(ds)}).")
+        ds = Subset(ds, kept)
+
     # 3. Create the distributed sampler
     # drop_last=True is CRITICAL here to ensure batch sizes are identical 
     # across all ranks for the SIGReg global expectation step.
@@ -678,6 +703,11 @@ def parse_args():
                    default=["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"],
                    help="comma-separated CAMELS fields to pool; default = all 12 both-suite fields. "
                         "Trim for fast iteration, e.g. --fields Mgas (missing files auto-skipped).")
+    p.add_argument("--holdout-test-sims", action="store_true",
+                   help="H9 control: exclude the probe's 100 test sims (sim_split seed=0) from "
+                        "pretraining across ALL pooled fields, so the frozen encoder never sees the "
+                        "probe test set even unlabeled. Compare this arm's probe R2 to the standard "
+                        "arm: if ~equal, in-suite leakage is negligible and the tokenizer win holds.")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--no-augment", action="store_true",
                    help="disable exact periodic symmetry augmentation (roll/rot90/flip) on the "
