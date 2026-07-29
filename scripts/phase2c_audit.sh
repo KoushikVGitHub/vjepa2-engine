@@ -56,7 +56,7 @@ om, s8 = [], []
 for s in seeds:
     try: t = open(f"{log}/{pfx}_{lbl}_s{s}.log").read()
     except FileNotFoundError: continue
-    m = re.search(r"R2\s*:\s*Omega_m=([0-9.]+)\s+sigma8=([0-9.]+)", t)
+    m = re.search(r"R2\s*:\s*Omega_m=(-?[0-9.]+)\s+sigma8=(-?[0-9.]+)", t)  # A3: keep negative R2 (H7 floor)
     if m: om.append(float(m[1])); s8.append(float(m[2]))
 f = lambda v: (sum(v)/len(v), st.pstdev(v) if len(v) > 1 else 0.0)
 if om:
