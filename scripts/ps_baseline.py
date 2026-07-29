@@ -31,7 +31,16 @@ Pure numpy -- no sklearn/scipy -- so it runs on the pod with zero extra installs
       --field Mgas
 """
 import argparse
+import os
+import sys
+
 import numpy as np
+
+# Reuse the PROBE's exact split so pk is scored on identical sims (apples-to-apples). Importing
+# probe pulls torch, but it makes the split a single source of truth -- no risk of a re-implemented
+# split drifting from the probe's. scripts/test_ps_baseline_split.py proves the alignment on CPU.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+from probe import sim_split
 
 
 # ----------------------------------------------------------------- power spectrum
@@ -63,27 +72,33 @@ def moments(img):
 
 
 # ----------------------------------------------------------------- ridge (closed form, numpy)
-def ridge_r2(Xtr, ytr, Xva, yva, alphas):
-    """Fit ridge on train, pick alpha by best VAL R^2, return (r2, rmse, alpha).
+def ridge_test(Xtr, ytr, Xva, yva, Xte, yte, alphas):
+    """Fit ridge on TRAIN, select alpha by best VAL R^2, then report R^2/RMSE on the held-out TEST.
 
-    Features standardized on train stats; bias column left UNPENALIZED. y is 1-D (one target),
-    so alpha is selected per target -- the fair per-parameter reading.
+    Returns (r2_test, rmse_test, alpha, r2_val). The reported number is the TEST R^2 -- the
+    model-selection (val) set is NOT reported, so this is an honest generalization number directly
+    comparable to the SSL probe's test R^2. Features standardized on TRAIN stats only; bias column
+    UNPENALIZED; y is 1-D so alpha is selected per target. The fit (A,b) uses train only, so
+    selecting alpha on val never leaks into the coefficients.
     """
     m, s = Xtr.mean(0), Xtr.std(0) + 1e-8
-    Xtr = np.hstack([(Xtr - m) / s, np.ones((len(Xtr), 1))])
-    Xva = np.hstack([(Xva - m) / s, np.ones((len(Xva), 1))])
-    D = Xtr.shape[1]
-    pen = np.eye(D); pen[-1, -1] = 0.0                      # don't penalize the bias term
-    A, b = Xtr.T @ Xtr, Xtr.T @ ytr
-    ss_tot = ((yva - yva.mean()) ** 2).sum()
-    best = (-np.inf, np.inf, None)
-    for al in alphas:
+    aug = lambda X: np.hstack([(X - m) / s, np.ones((len(X), 1))])
+    Xtr_, Xva_, Xte_ = aug(Xtr), aug(Xva), aug(Xte)
+    D = Xtr_.shape[1]
+    pen = np.eye(D); pen[-1, -1] = 0.0                     # don't penalize the bias term
+    A, b = Xtr_.T @ Xtr_, Xtr_.T @ ytr
+    ss_va = ((yva - yva.mean()) ** 2).sum()
+    best_al, best_val = None, -np.inf
+    for al in alphas:                                      # select alpha on VAL
         w = np.linalg.solve(A + al * pen, b)
-        resid = yva - Xva @ w
-        r2 = 1.0 - (resid ** 2).sum() / ss_tot
-        if r2 > best[0]:
-            best = (r2, float(np.sqrt((resid ** 2).mean())), float(al))
-    return best
+        r2 = 1.0 - ((yva - Xva_ @ w) ** 2).sum() / ss_va
+        if r2 > best_val:
+            best_val, best_al = r2, float(al)
+    w = np.linalg.solve(A + best_al * pen, b)              # report on held-out TEST
+    resid = yte - Xte_ @ w
+    ss_te = ((yte - yte.mean()) ** 2).sum()
+    r2_te = 1.0 - (resid ** 2).sum() / ss_te
+    return r2_te, float(np.sqrt((resid ** 2).mean())), best_al, best_val
 
 
 def main():
@@ -94,7 +109,8 @@ def main():
     ap.add_argument("--nbins", type=int, default=32, help="P(k) radial bins")
     ap.add_argument("--maps-per-sim", type=int, default=15)
     ap.add_argument("--transform", default="log10", choices=["log10", "asinh", "none"])
-    ap.add_argument("--val-frac", type=float, default=0.2, help="fraction of SIMS held out")
+    ap.add_argument("--val-frac", type=float, default=0.2,
+                    help="DEPRECATED / ignored -- the split is now probe.sim_split (fixed 80/10/10).")
     ap.add_argument("--limit", type=int, default=0, help="cap #maps for a quick pass (0 = all)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
@@ -123,39 +139,37 @@ def main():
         if i % 2000 == 0:
             print(f"  featurized {i}/{N}")
 
-    # sim-level split: whole simulations go entirely to train or val (no map from a val sim
-    # ever leaks into train), matching the probe's split discipline.
-    sims = np.unique(SIM)
-    rng = np.random.default_rng(args.seed)
-    rng.shuffle(sims)
-    n_val = max(1, int(len(sims) * args.val_frac))
-    val_sims = set(sims[:n_val].tolist())
-    va = np.array([s in val_sims for s in SIM])
-    tr = ~va
-    print(f"[{args.field}] split: {tr.sum()} train / {va.sum()} val maps "
-          f"({len(sims) - n_val}/{n_val} sims)\n")
+    # sim-level split IDENTICAL to the probe (probe.sim_split, 80/10/10, seed=0): pk is fit on the
+    # same train sims, alpha selected on the same val sims, and reported on EXACTLY the probe's
+    # held-out TEST sims -> the pk number is now apples-to-apples with the SSL probe's test R^2.
+    # (Requires identity manifest: map position i belongs to sim i//maps_per_sim, true for keep-all
+    # fields like Mgas. sim_split hard-asserts N % maps_per_sim == 0.)
+    tr_idx, va_idx, te_idx = sim_split(N, maps_per_sim=args.maps_per_sim, seed=args.seed)
+    print(f"[{args.field}] sim_split(seed={args.seed}): {len(tr_idx)} train / {len(va_idx)} val / "
+          f"{len(te_idx)} test maps ({len(tr_idx)//args.maps_per_sim}/{len(va_idx)//args.maps_per_sim}/"
+          f"{len(te_idx)//args.maps_per_sim} sims); reporting TEST R^2\n")
 
     alphas = np.logspace(-3, 4, 15)
     feats = {"pk": PK, "moments": MOM, "pk+moments": np.hstack([PK, MOM])}
     names = ["Omega_m", "sigma_8"]
 
     print(f"{'feature':<12}{'dim':>5}   "
-          f"{'R2(Om)':>8}{'R2(s8)':>8}   {'RMSE(Om)':>10}{'RMSE(s8)':>10}")
-    print("-" * 66)
+          f"{'R2(Om)':>8}{'R2(s8)':>8}   {'RMSE(Om)':>10}{'RMSE(s8)':>10}   (TEST set)")
+    print("-" * 76)
     for fname, X in feats.items():
         row = [f"{fname:<12}{X.shape[1]:>5}   "]
         rmses = []
         for t in range(2):
-            r2, rmse, _ = ridge_r2(X[tr], Y[tr, t], X[va], Y[va, t], alphas)
+            r2, rmse, _, _ = ridge_test(X[tr_idx], Y[tr_idx, t], X[va_idx], Y[va_idx, t],
+                                        X[te_idx], Y[te_idx, t], alphas)
             row.append(f"{r2:>8.3f}")
             rmses.append(rmse)
         row.append("   " + "".join(f"{r:>10.4f}" for r in rmses))
         print("".join(row))
 
-    print("-" * 66)
-    print(f"{'SSL probe*':<12}{'--':>5}   {0.500:>8.3f}{0.310:>8.3f}   "
-          f"{'(Mgas ref)':>10}")
-    print("\n* SSL reference = trained attentive probe on our VISReg+cov encoder (Mgas).")
+    print("-" * 76)
+    print("* compare the pk TEST R^2 above against the SSL probe's TEST R^2 for the SAME field,")
+    print("  measured by scripts/run_probe.py on the same sim_split(seed=0) test sims (see learnings.md).")
     print("  Read:  SSL~=pk -> Gaussian plateau (Track 3 warranted);  SSL>pk -> real SSL gain;"
           "\n         moments>SSL -> non-Gaussian info the pretext is leaving on the table.")
 
