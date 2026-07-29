@@ -86,9 +86,9 @@ def main():
     ap.add_argument("--enc-d", type=int, default=ENC["d"])
     ap.add_argument("--enc-heads", type=int, default=ENC["heads"])
     ap.add_argument("--enc-layers", type=int, default=ENC["layers"])
-    ap.add_argument("--stem", choices=["linear", "conv", "mlp"], default="linear",
-                    help="tokenizer -- MUST match how the checkpoint was trained (conv->conv_stem.*, "
-                         "mlp->mlp_stem.*, linear->proj.* keys).")
+    ap.add_argument("--stem", choices=["linear", "conv", "convdisjoint", "mlp"], default="linear",
+                    help="tokenizer -- MUST match how the checkpoint was trained (conv/convdisjoint->"
+                         "conv_stem.*, mlp->mlp_stem.*, linear->proj.* keys).")
     ap.add_argument("--stem-pad", choices=["circular", "zeros"], default="circular",
                     help="conv-stem padding -- MUST match training (only used when --stem conv).")
     ap.add_argument("--random-init", action="store_true",

@@ -732,9 +732,11 @@ def parse_args():
     p.add_argument("--ckpt", action="store_true", help="activation checkpointing")
     p.add_argument("--img", type=int, default=256, help="CAMELS 2D maps are 256x256")
     p.add_argument("--patch", type=int, default=16)
-    p.add_argument("--stem", choices=["linear", "conv", "mlp"], default="linear",
+    p.add_argument("--stem", choices=["linear", "conv", "convdisjoint", "mlp"], default="linear",
                    help="tokenizer: 'linear' = disjoint-patch linear embed (default); 'conv' = overlapping "
-                        "conv-stem (Phase-2 winner); 'mlp' = param-matched disjoint-patch MLP (H1 control).")
+                        "conv-stem (Phase-2 winner); 'convdisjoint' = same conv-stem but NON-overlapping "
+                        "(kernel=stride, S3 overlap-isolation control); 'mlp' = param-matched disjoint-patch "
+                        "MLP (H1 control).")
     p.add_argument("--stem-pad", choices=["circular", "zeros"], default="circular",
                    help="conv-stem padding (only used when --stem conv): 'circular' = periodic (default), "
                         "'zeros' = H11 ablation isolating the periodicity contribution.")

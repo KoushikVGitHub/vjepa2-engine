@@ -142,18 +142,28 @@ class ConvStem(nn.Module):
         because CAMELS boxes are periodic; `pad="zeros"` is the H11 ablation.
     """
 
-    def __init__(self, patch, d, in_ch=1, pad="circular"):
+    def __init__(self, patch, d, in_ch=1, pad="circular", overlap=True):
         super().__init__()
         nlayers = int(round(math.log2(patch)))
         if 2 ** nlayers != patch:
             raise ValueError(f"conv-stem needs a power-of-2 patch, got {patch}.")
+        # overlap=True (Phase-2 winner): kernel-3 stride-2 pad-1 -> receptive fields CROSS patch
+        # boundaries. overlap=False (S3 control, "convdisjoint"): kernel-2 stride-2 pad-0 -> the conv
+        # receptive field of each output token is EXACTLY one disjoint patch, no cross-patch mixing --
+        # same depth / channel schedule / GroupNorm / GELU / 1x1 as conv, so the ONLY difference from
+        # conv is the receptive-field overlap. If conv >> convdisjoint the gain is overlap; if
+        # conv ~= convdisjoint it is depth/GroupNorm/nonlinearity, not overlap. (NB GroupNorm(1,C)
+        # normalizes over all spatial positions, so BOTH variants share a weak global coupling via the
+        # norm stats -- held constant across the contrast, so it does not confound the overlap read.)
+        self.overlap = overlap
+        k, p = (3, 1) if overlap else (2, 0)
         # channel schedule doubles up to the embed dim: patch8/d1024 -> [1,128,256,512],
         # patch16/d1024 -> [1,64,128,256,512]; last stride-2 output is d//2, then a 1x1 to d.
         chs = [in_ch] + [d // (2 ** (nlayers - i)) for i in range(nlayers)]
         layers = []
         for i in range(nlayers):
             layers += [
-                nn.Conv2d(chs[i], chs[i + 1], kernel_size=3, stride=2, padding=1,
+                nn.Conv2d(chs[i], chs[i + 1], kernel_size=k, stride=2, padding=p,
                           padding_mode=pad),
                 nn.GroupNorm(1, chs[i + 1]),   # LayerNorm-equivalent; no running stats (FSDP/bf16-safe, unlike BN)
                 nn.GELU(),
@@ -226,11 +236,13 @@ class ViTEncoder(nn.Module):
         if stem == "linear":
             self.proj = nn.Linear(patch * patch, d)
         elif stem == "conv":
-            self.conv_stem = ConvStem(patch, d, pad=stem_pad)
+            self.conv_stem = ConvStem(patch, d, pad=stem_pad, overlap=True)
+        elif stem == "convdisjoint":
+            self.conv_stem = ConvStem(patch, d, pad=stem_pad, overlap=False)   # S3 overlap-isolation control
         elif stem == "mlp":
             self.mlp_stem = MLPStem(patch, d)
         else:
-            raise ValueError(f"unknown stem {stem!r} (expected 'linear' | 'conv' | 'mlp').")
+            raise ValueError(f"unknown stem {stem!r} (expected 'linear' | 'conv' | 'convdisjoint' | 'mlp').")
         self.pos = nn.Parameter(torch.randn(self.n, d) * 0.02)
         layer = nn.TransformerEncoderLayer(d, heads, d * 2, batch_first=True, dropout=0.0)
         self.blocks = nn.TransformerEncoder(layer, layers)
