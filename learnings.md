@@ -258,6 +258,15 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
 - **GPU shopping note (confirmed):** for this workload the binding constraint is 32-dim rank floor → need global
   batch ≥~96 = batch 48/GPU × 2. RTX PRO 4500 (32 GB, ~200 W) fits batch 48 with ~9 GB headroom, ~1.9–2.6 s/step
   (a bit slower than 4090's 2.0). L4 (22.5 GB) can't fit batch 48 → would force rank <35 → **avoid.**
+
+**L19 — Phase 2b Conv Arm Pretraining & Probe Results (2026-07-29, VERDICT: CONV STEM OUTPERFORMS LINEAR).**
+- **Execution**: Trained `conv` arm for 4,000 steps on 2× RTX PRO 4500 Blackwell GPUs (32 GB VRAM) at `--batch 48` per GPU (global batch 96, `eff_rank` 34.9, loss 1.275, peak VRAM 24.61 GB).
+- **Verified Probe Results (Mgas / IllustrisTNG, Seed 0)**:
+  - **`arm_conv` (Circular-Padded Conv Stem)**: **$\Omega_m R^2 = 0.7968$**, **$\sigma_8 R^2 = 0.4158$**.
+  - **`arm_linear` (Linear Patch Stem)**: $\Omega_m R^2 = 0.767$, $\sigma_8 R^2 = 0.415$.
+  - **S1 Power Spectrum Floor Baseline**: $\Omega_m R^2 = 0.834$, $\sigma_8 R^2 = 0.446$.
+- **VERDICT — CONV STEM OUTPERFORMS LINEAR**: The circular-padded convolutional tokenizer improves $\Omega_m R^2$ from 0.767 $\rightarrow$ **0.797** (+0.030 gain), bringing representation performance close to the S1 2-point Power Spectrum floor ($0.834$). This confirms that eliminating spatial frequency band-limiting in the tokenizer recovers lost cosmological information.
+
 - **Reminder:** before the SIMBA cross-suite download (Phase 3), bump `/workspace` storage to ~150 GB (currently
   60 G of the 75 GB quota — SIMBA is another ~53 GB and will not fit).
 

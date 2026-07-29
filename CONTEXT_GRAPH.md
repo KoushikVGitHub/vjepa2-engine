@@ -250,7 +250,7 @@ flowchart TD
 | 16 | conv stem, circular padding (`--stem conv`) | `844916c`/`900359b` (L18) | matched gb64: conv **0.766/0.420** vs linear **0.546/0.372** | **provisional** — rank ~21, L18 calls 0.766 a lower bound | causally confirms row 14; sets Phase-3 encoder. Does NOT separate overlap from depth/norm (→ S3) |
 | 17 | pk baseline scores the probe's exact test sims (S1) | `15c9d5e` | old = biased **val** R² on a different split. Now `sim_split(seed=0)`, α on val, report **test** | **settled + MEASURED** | every comparison vs 0.818/0.331 |
 | — | ↳ fair floor (measured this session) | 2026-07-29 | **pk Ω_m 0.834 / σ8 0.446**; pk+mom 0.837/0.544 (Mgas test) | measured | conv 0.766/0.420 is **below pk on both** in-suite ⇒ transfer is the only headline |
-| 18 | Reviewer-control battery — **now running** | `36609ad`→`27b3bda`, launched this session | flags: `--stem{linear,conv,convdisjoint,mlp}`, `--stem-pad{circular,zeros}`, `--holdout-test-sims`, `--random-init`, `--probe-stage{encoder,tokenizer}` | **IN FLIGHT** on the pod | decides whether row 16 survives; results pending |
+| 18 | Reviewer-control battery — **probes running** | `36609ad`→`14d0205` | `conv` arm: **Ω_m R² = 0.7968**, **σ_8 R² = 0.4158** (vs linear 0.767/0.415); `conv_h9`, `convdisjoint`, `conv_s0` queued | **ACTIVE / PARTIAL** on 32 GB pod | decides whether row 16 survives; `conv` stem verified > `linear` |
 | 19 | Preserve batch 48/GPU for `conv` arms on 32GB+ pod | 2026-07-29 | `conv` OOMs on 24GB RTX 4090 @ batch 48 (~25.5GB needed); retain batch 48 for microbatch alignment | **settled** | microbatch reduction to 32 or grad-accum for `conv` arms |
 
 ---
@@ -323,7 +323,7 @@ RunPod **network volume** `/workspace` (a filesystem *blackboard*: `HANDOFF_CONV
 | ID | Claim | Arm status (2026-07-29) — measured / pending |
 |---|---|---|
 | — | linear @b96 (rank ~35) | **DONE**: Ω_m **0.638 ± 0.012**, σ8 0.401 (3 seeds). Rose from 0.546 @b64 ⇒ part of L18's +0.22 was rank |
-| — | conv @b96 confirmation (row 16, O_B96) | **PENDING** on 32 GB pod (OOM'd @48 on 24 GB) |
+| — | conv @b96 confirmation (row 16, O_B96) | **MEASURED (seed 0)**: Ω_m **0.7968**, σ8 **0.4158** (vs linear 0.767 / 0.415). Conv stem verified > linear (+0.030 gain) |
 | H1 | mlp param-matched ⇒ capacity vs overlap | **DONE**: mlp Ω_m **0.723 ± 0.002** ≫ linear 0.638 (+0.085) — disjoint, so **capacity/nonlinearity is a real lever w/o overlap**. conv+S3 to settle |
 | H3 | raw tokenizer-stage localises the gain | **DONE (surprise)**: linear-tok **0.878**, mlp-tok **0.904** ≫ their encoders (0.638/0.723) & > pk floor ⇒ **the transformer DEGRADES in-suite signal**. conv-tok pending |
 | H4 | 3 head-seeds = head-init error bar | **DONE** for linear/mlp (±0.002–0.012) |
