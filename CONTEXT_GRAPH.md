@@ -313,32 +313,34 @@ recursion; **A15** one mask shared per batch.
 
 ## 6. Live state, open questions, and known drift
 
-### In flight (this session — supersedes "nothing running")
-`auditchain` on `157.157.221.29:31250` runs, in order: **`phase2b_controls.sh`** (linear→conv→mlp,
-then H1/H3/H4/H5/H7 probes) → **`phase2b_h9.sh`** (H9) → **`phase2c_audit.sh`** (S3 convdisjoint +
-S2 seed-0 linear/conv). One monitor watches to "PHASE 2c DONE".
+### In flight → split across two pods (2026-07-29; supersedes the single-`auditchain` plan)
+`conv` OOMs at batch 48 on the 24 GB 4090 (row 19), so the battery was **split**: linear/mlp
+trained+probed on the 24 GB pod (now **stopped** — done); conv + convdisjoint + conv_h9 + *_s0 run on
+a **32 GB pod** (a second/antigravity agent) at matched batch 48, coordinating through the shared
+RunPod **network volume** `/workspace` (a filesystem *blackboard*: `HANDOFF_CONV.md`,
+`RESULTS_LINMLP.md`, `CONV_FIX.md`; not A2A). Final table via `scripts/phase2_verdict.py`.
 
-| ID | Claim | Arm status (2026-07-29) |
+| ID | Claim | Arm status (2026-07-29) — measured / pending |
 |---|---|---|
-| — | batch-96 linear baseline (row 14) | **DONE** (4000 steps, `eff_rank` ~34, `ckpt_p2b_linear.pt` saved, probe running) |
-| — | batch-96 conv confirmation (row 16, O_B96) | **OOM @ batch 48 on 24GB pod**; deferred to 32GB+ pod (row 19) |
-| H1 | mlp param-matched ⇒ capacity vs overlap | **TRAINING** (step 100+ / 4000 on 24GB pod; probe queued) |
-| H3 | raw tokenizer-stage localises the gain | queued for `linear` & `mlp`; `conv` deferred to 32GB+ pod |
-| H4 | 3 head-seeds = head-init error bar | queued for `linear` & `mlp` |
-| H5 | second field Mcdm = generality | queued for `linear` & `mlp` |
-| H7 | random-init = learned-nothing floor | deferred to 32GB+ pod (`conv` ckpt) |
-| H9 | holdout-test-sims = no leakage | deferred to 32GB+ pod (`conv_h9` arm) |
-| H11 | zeros vs circular = periodicity | deferred to 32GB+ pod (`convz` arm) |
-| S1 | pk on the probe's test sims | **DONE + measured**: 0.834/0.446 |
-| S2 | second **pretraining** seed | `linear_s0` in `phase2c_audit.sh`; `conv_s0` deferred to 32GB+ pod |
-| S3 | convdisjoint = overlap vs depth/norm | deferred to 32GB+ pod (`convdisjoint` arm) |
+| — | linear @b96 (rank ~35) | **DONE**: Ω_m **0.638 ± 0.012**, σ8 0.401 (3 seeds). Rose from 0.546 @b64 ⇒ part of L18's +0.22 was rank |
+| — | conv @b96 confirmation (row 16, O_B96) | **PENDING** on 32 GB pod (OOM'd @48 on 24 GB) |
+| H1 | mlp param-matched ⇒ capacity vs overlap | **DONE**: mlp Ω_m **0.723 ± 0.002** ≫ linear 0.638 (+0.085) — disjoint, so **capacity/nonlinearity is a real lever w/o overlap**. conv+S3 to settle |
+| H3 | raw tokenizer-stage localises the gain | **DONE (surprise)**: linear-tok **0.878**, mlp-tok **0.904** ≫ their encoders (0.638/0.723) & > pk floor ⇒ **the transformer DEGRADES in-suite signal**. conv-tok pending |
+| H4 | 3 head-seeds = head-init error bar | **DONE** for linear/mlp (±0.002–0.012) |
+| H5 | second field Mcdm = generality | **DONE**: linear 0.606/0.653, mlp 0.675/0.748; mlp>linear holds, Mcdm σ8 ≫ Mgas σ8 |
+| H7 | random-init = learned-nothing floor | PENDING on 32 GB pod (`conv` random floor) |
+| H9 | holdout-test-sims = no leakage | PENDING on 32 GB pod (`conv_h9`) — ⚠ confounds 10% less data (A5) |
+| H11 | zeros vs circular = periodicity | not queued (one `ARMS+=convz` flag) |
+| S1 | pk on the probe's test sims | **DONE + measured**: Ω_m **0.834**, σ8 **0.446** (pk+moments 0.837/0.544) |
+| S2 | second **pretraining** seed | PENDING on 32 GB pod (`linear_s0`, `conv_s0` vs seed-1234) |
+| S3 | convdisjoint = overlap vs depth/norm | **PENDING (the decider)** on 32 GB pod |
 
 ### Open questions, exactly
-- **Is the σ8 win real?** Best σ8 0.420 vs the fair floor 0.446 — **it is not, in-suite** (O_SIGMA8).
-  This inverts the old README headline. Transfer (Phase 3) is where the σ8/non-Gaussian claim must be made.
-- **Is 0.766 the conv number or a floor?** Measured at rank ~21; the batch-96 confirmation is the first arm now running.
-- **Overlap, or depth/GroupNorm/nonlinearity?** S3 (`convdisjoint`) — the question a reviewer asks first.
-- **Survives a second pretraining seed?** S2.
+- **Is the σ8 win real?** No, in-suite: best σ8 0.420 < fair floor 0.446 (O_SIGMA8). The non-Gaussian/σ8 claim must come from cross-suite transfer.
+- **Overlap, or capacity/nonlinearity?** **Leaning capacity:** mlp (disjoint, +0.085 over linear) already recovers most of the gain (H1). `convdisjoint` (S3) is the decider — pending.
+- **Is 0.766 the conv number or a floor?** Pending conv @b96; linear rose to 0.638 @b96, so the real delta = conv@b96 − 0.638, not the old +0.22.
+- **Is the transformer even helping in-suite?** **H3 says no** — raw tokenizer (0.878/0.904) beats the encoder. Strongest evidence yet that the whole thesis rests on *transfer*, not in-suite accuracy.
+- **Survives a second pretraining seed?** S2 — pending.
 - **Mask geometry (8×1 vs 4×4)?** Never run (O_GEOM).
 - **Exit gate** (`learnings.md:343`): σ8 ≥ 0.33 **and** Ω_m ≥ ~0.65 before transfer. Conv clears Ω_m; σ8 depends on the floor.
 - **All 6 params / multi-channel input** — unstarted.
