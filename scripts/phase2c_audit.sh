@@ -20,7 +20,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 STEPS=${STEPS:-4000}; BATCH=${BATCH:-48}; PEAK=${PEAK:-165}; W=${W:-32}
 SEEDS=${SEEDS:-"0 1 2"}     # PROBE-HEAD seeds (per ckpt)
 BASE="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm \
-  --ckpt --peak-tflops $PEAK --d 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --n-blocks 4 \
+  --ckpt --peak-tflops $PEAK --edim 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --n-blocks 4 \
   --steps $STEPS --batch $BATCH --save-every $STEPS --log-every 100"
 
 # label -> "train-flags|ckpt|probe-stem"  (probe pad is circular for all conv variants)

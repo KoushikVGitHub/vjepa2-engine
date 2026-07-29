@@ -26,7 +26,7 @@ ARMS=${ARMS:-"linear conv mlp"}     # append "convz" for the H11 zeros-padding a
 SEEDS=${SEEDS:-"0 1 2"}
 FIELD2=${FIELD2:-Mcdm}
 BASE="--mode fsdp --bf16 --loss lejepa --sigreg-lambda 0.7 --lr 5e-5 --var-coef 5.0 --cov-coef 4e-2 --target-norm \
-  --ckpt --peak-tflops $PEAK --d 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --n-blocks 4 \
+  --ckpt --peak-tflops $PEAK --edim 1024 --layers 24 --heads 16 --img 256 --patch 8 --block 8 --n-blocks 4 \
   --steps $STEPS --batch $BATCH --save-every $STEPS --log-every 100"
 
 # arm -> "train-flags|ckpt|probe-stem|probe-pad"
