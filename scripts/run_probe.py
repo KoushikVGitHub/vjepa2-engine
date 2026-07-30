@@ -9,6 +9,7 @@ Usage:
   python scripts/run_probe.py --ckpt /workspace/ckpt.pt --field Mgas --epochs 20
 """
 import argparse
+import hashlib
 import os
 import sys
 
@@ -69,6 +70,47 @@ def cached_loader(tds, bs, shuffle):
     return DataLoader(tds, batch_size=bs, shuffle=shuffle, drop_last=False, pin_memory=True)
 
 
+def _feat_sig(cache_dir, ckpt, enc_cfg, field, suite, split, probe_stage, random_init, seed):
+    """Disk path for a split's cached features. The key covers everything that changes the tokens:
+    ckpt identity (abspath + mtime + size), encoder geometry, field/suite/split, and probe-stage.
+    It includes --seed ONLY for a random-init encoder -- those weights come from the torch RNG, so
+    they are seed-dependent; a *trained* encoder's forward is deterministic AND sim_split has a fixed
+    internal seed=0, so its features are seed-independent and head-seed reprobes share one cache."""
+    if random_init:
+        ck_id = f"randominit:seed{seed}"
+    else:
+        try:
+            st = os.stat(ckpt)
+            ck_id = f"{os.path.abspath(ckpt)}:{int(st.st_mtime)}:{st.st_size}"
+        except OSError:
+            ck_id = os.path.abspath(ckpt)
+    geom = "-".join(f"{k}{enc_cfg[k]}" for k in sorted(enc_cfg))
+    key = f"{ck_id}|{geom}|{field}|{suite}|{split}|{probe_stage}"
+    h = hashlib.sha1(key.encode()).hexdigest()[:16]
+    return os.path.join(cache_dir, f"feat_{field}_{suite}_{split}_{probe_stage}_{h}.pt")
+
+
+@torch.no_grad()
+def cached_tokens(encoder, ds, idx, device, bs, workers, path):
+    """Disk-persisted wrapper around precompute_tokens: load the split's features if the cache file
+    exists, else run the encoder ONCE and save them atomically. Lets repeat probes (head-seeds,
+    ridge-alpha sweeps, CPU-only refits) skip the encoder pass entirely. The saved tensors are the
+    exact device-computed bf16 tokens, so a later CPU load yields identical features -- no fp32/bf16
+    skew, so R^2 stays comparable to a GPU run. path=None disables the disk layer (in-RAM only)."""
+    if path and os.path.exists(path):
+        obj = torch.load(path, map_location="cpu")
+        print(f"[probe] cached features HIT  <- {os.path.basename(path)} {tuple(obj['x'].shape)}")
+        return TensorDataset(obj["x"], obj["y"])
+    tds = precompute_tokens(encoder, ds, idx, device, bs, workers)
+    if path:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"        # atomic: a killed run leaves no partial cache file
+        torch.save({"x": tds.tensors[0], "y": tds.tensors[1]}, tmp)
+        os.replace(tmp, path)
+        print(f"[probe] cached features SAVED -> {os.path.basename(path)}")
+    return tds
+
+
 def _print_metrics(res):
     for k, v in res.items():
         print(f"  {k:9s}: Omega_m={v[0]:.4f}   sigma8={v[1]:.4f}")
@@ -109,6 +151,13 @@ def main():
     ap.add_argument("--precompute-batch", type=int, default=256,
                     help="batch size for the one-time feature precompute pass (frozen fwd, no grad "
                          "-> can be large)")
+    ap.add_argument("--feat-cache-dir", default=None,
+                    help="dir for DISK-persisted frozen features (default: <data-root>/_probe_feat_cache). "
+                         "First probe of a ckpt extracts + saves; later head-seed / ridge-alpha / CPU "
+                         "refits load from disk and skip the encoder pass entirely.")
+    ap.add_argument("--no-disk-cache", action="store_true",
+                    help="keep the in-RAM feature cache but do NOT read/write the disk cache "
+                         "(use when volume space is tight; each split cache is ~0.75-6GB).")
     args = ap.parse_args()
 
     # Seed the probe (head init + train-loader shuffle both use torch's global RNG) so re-probing
@@ -123,6 +172,16 @@ def main():
                    layers=args.enc_layers, stem=args.stem, stem_pad=args.stem_pad)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Disk feature cache: on unless --no-cache (caching off entirely) or --no-disk-cache (RAM only).
+    cdir = None if (args.no_cache or args.no_disk_cache) else (
+        args.feat_cache_dir or os.path.join(args.data_root, "_probe_feat_cache"))
+
+    def _featpath(suite, split):
+        if cdir is None:
+            return None
+        return _feat_sig(cdir, args.ckpt, enc_cfg, args.field, suite, split,
+                         args.probe_stage, args.random_init, args.seed)
 
     enc = load_frozen_encoder(args.ckpt, device, random_init=args.random_init, **enc_cfg)
     enc.probe_stage = args.probe_stage            # H3: read raw tokenizer output when "tokenizer"
@@ -145,14 +204,15 @@ def main():
         va = loader(ds, va_idx, 128, False, args.workers)
         te = loader(ds, te_idx, 128, False, args.workers)
     else:
-        print("[probe] precomputing frozen features (one bf16 pass over each split)...")
+        print("[probe] precomputing frozen features (one bf16 pass over each split)..."
+              + ("" if cdir is None else f"  [disk cache: {cdir}]"))
         enc_head = None
-        tr = cached_loader(precompute_tokens(enc, ds, tr_idx, device, args.precompute_batch, args.workers),
-                           args.batch, True)
-        va = cached_loader(precompute_tokens(enc, ds, va_idx, device, args.precompute_batch, args.workers),
-                           256, False)
-        te = cached_loader(precompute_tokens(enc, ds, te_idx, device, args.precompute_batch, args.workers),
-                           256, False)
+        tr = cached_loader(cached_tokens(enc, ds, tr_idx, device, args.precompute_batch, args.workers,
+                                         _featpath(args.suite, "train")), args.batch, True)
+        va = cached_loader(cached_tokens(enc, ds, va_idx, device, args.precompute_batch, args.workers,
+                                         _featpath(args.suite, "val")), 256, False)
+        te = cached_loader(cached_tokens(enc, ds, te_idx, device, args.precompute_batch, args.workers,
+                                         _featpath(args.suite, "test")), 256, False)
 
     train_probe(enc_head, head, tr, va, device, epochs=args.epochs)
 
@@ -167,8 +227,8 @@ def main():
         if args.no_cache:
             hte = loader(hds, h_idx, 128, False, args.workers)
         else:
-            hte = cached_loader(precompute_tokens(enc, hds, h_idx, device, args.precompute_batch, args.workers),
-                                256, False)
+            hte = cached_loader(cached_tokens(enc, hds, h_idx, device, args.precompute_batch, args.workers,
+                                              _featpath(args.heldout, "heldout")), 256, False)
         print(f"\n=== HELD-OUT ({args.heldout}) = cross-suite robustness ===")
         _print_metrics(eval_probe(enc_head, head, hte, device))
     else:
