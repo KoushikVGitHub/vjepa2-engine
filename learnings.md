@@ -323,6 +323,36 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
 - **Net so far (provisional):** the headline is shifting from "conv-stem band-limiting win" to a more honest, more interesting story — **in-suite, SSL is below its own raw tokenizer and below pk; the value proposition rests entirely on cross-suite *transfer*.** Conv landed at 0.797 but the conv-vs-linear *gain* is **undefined until the 0.638/0.767 linear conflict is settled** — that reconciliation, not the conv number, is the gating result.
 - **NEXT SESSION (tomorrow) — ordered checklist.** (1) Get the 32 GB pod SSH (or have antigravity commit `/workspace/logs`); run `python scripts/phase2_verdict.py --logs /workspace/logs`. (2) **Reconcile linear: which seed is antigravity's 0.767?** Read its probe log header — if it's seed 0, we have a same-seed A/B (conv +0.030) *and* a 0.13 seed swing on linear ⇒ **S2 is the story.** If it's seed 1234, it contradicts our 0.638 3-seed mean → a probe/config bug to hunt. (3) Pull convdisjoint (S3), conv-tok (H3), H7, H9, S2 → fill the verdict table. (4) Only then write the final L19 verdict + close CONTEXT_GRAPH decision row 16/18. (5) If deltas survive seed noise → Phase 3 (SIMBA cross-suite: bump `/workspace` to ~150 GB, T5 norm injection). If not → the honest paper is "in-suite tokenizer deltas are within seed noise; transfer is the only signal."
 
+
+**L20 — Phase 2c in-suite bundle CLOSES L19's open verdict (2026-08-01) — S2 kills the seed-swing scare; S3 revives overlap; in-suite is settled, transfer is the headline.**
+- **Why this entry.** L19 landed the conv arm (0.797 @b96) but left the verdict *undefined*, gated on ONE discrepancy: is linear 0.638 (our seed 1234) or 0.767 (antigravity seed 0)? If 0.767, every tokenizer delta drowns in pretraining-seed noise. Phase 2c ran the remaining controls — S2 (2nd pretraining seed per arm), S3 (`convdisjoint` overlap decider), H9 (strict hygiene) — on an A40, then probed all 5 arms × 3 head-seeds on a cheap RTX-4000-Ada (frozen encoder, in-RAM cache), A100 released as soon as training finished.
+- **In-suite Mgas / IllustrisTNG, R² (mean ± std over head-seeds 0–2), batch-96, rank ~35:**
+
+  | Arm | Stem | Ω_m | σ8 | seeds |
+  |---|---|---|---|---|
+  | conv_s0 | overlapping conv | **0.809 ± 0.007** | 0.389 ± 0.013 | pretrain s0 (today) |
+  | conv_reprobe (p2b_conv) | overlapping conv | 0.795 ± 0.002 | 0.413 ± 0.014 | p2b run |
+  | conv_h9 | overlapping conv, held-out test sims | 0.787 ± 0.004 | 0.420 ± 0.007 | hygiene |
+  | convdisjoint | conv kernel=stride (NO overlap) | 0.748 ± 0.008 | 0.427 ± 0.011 | S3 decider |
+  | mlp (L19) | disjoint MLP tokenizer | 0.723 ± 0.002 | 0.375 ± 0.001 | H1 capacity |
+  | linear_s0 | linear patch-embed | 0.651 ± 0.016 | 0.355 ± 0.006 | **pretrain s0 (today)** |
+  | linear (L19) | linear patch-embed | 0.638 ± 0.012 | 0.401 ± 0.006 | pretrain s1234 |
+  | — fair pk floor (L19-S1) — | — | 0.834 | 0.446 | — |
+  | — raw tokenizer (L19-H3) — | linear-tok 0.878 / mlp-tok 0.904 | — | — |
+
+- **S2 — RESOLVES L19's decisive discrepancy AGAINST the seed-swing hypothesis.** New linear pretrain-seed-0 = **0.651 ± 0.016** sits next to our seed-1234 **0.638 ± 0.012**. Linear's pretraining-seed spread is **~0.013, not 0.13.** Conv likewise: p2b 0.795 vs seed-0 0.809 → spread ~0.014. Every arm's seed spread (~0.013) is ≈10× smaller than the conv-vs-linear gap (~0.15). ⇒ **Antigravity's linear 0.767 is an outlier (config/probe difference), not a pretraining-seed effect** — flag for a config check, but it is NOT load-bearing. **The feared "tokenizer deltas within seed noise" scenario does NOT hold; the deltas are significant.**
+- **S3 — REVIVES the overlap lever L19-H1 tentatively dismissed.** L19 saw mlp beat linear without overlap and guessed "overlap story likely wrong" — but mlp only isolates *capacity*. The `convdisjoint` decider (matched conv capacity, kernel=stride, NO cross-patch overlap) now lands at 0.748, giving a clean matched-batch decomposition (linear mean ~0.645):
+  - capacity / nonlinearity (linear→mlp): **+0.078**
+  - conv inductive bias, still disjoint (mlp→convdisjoint): **+0.025**
+  - **overlap (convdisjoint→conv): +0.061** — ~5× the ~0.01 run noise.
+  ⇒ **overlap IS a real, separable ~0.06 Ω_m lever on top of capacity.** Both capacity and overlap contribute; L19's "overlap likely wrong" is reversed by its own named decider.
+- **H9 — hygiene clean.** conv_h9 0.787 ≈ conv_reprobe 0.795 (within 0.008 across strictly held-out test sims). The conv score is not a leakage artifact.
+- **conv-vs-linear gain is now DEFINED (L19 said undefined):** conv ~0.80 vs linear ~0.645 = **+0.15 Ω_m, real and seed-robust.** No conv σ8 win (conv 0.39–0.42 ≈ linear 0.40).
+- **In-suite parity remains a dead end (L18/L19 stand, reinforced):** best conv 0.809 < fair pk 0.834 on Ω_m and 0.389 < 0.446 on σ8; and per L19-H3 the raw tokenizer (0.878 / 0.904) beats BOTH the transformer and pk ⇒ masked-JEPA *degrades* in-suite decodable signal. **In-suite accuracy is not the value proposition.**
+- **VERDICT.** The in-suite battery is settled: **conv (capacity + overlap) is the best in-suite arm, +0.15 Ω_m over linear, seed-robust, hygiene-clean, overlap causally isolated (S3).** It still loses in-suite to pk and to its own raw tokenizer. Therefore the only remaining headline is **cross-suite TRANSFER**: freeze conv_s0, probe on SIMBA, show ITNG-trained-norm retention beats pk's cross-suite drop. **Green-light Phase 3.** conv_s0 = the encoder.
+- **Method note (already fixed upstream).** Probe logs print RMSE / R2 / Coverage — a `tail -1` collation grabs Coverage, not R2; anchor to `R2 :`. This was already fixed on origin/main (9f98d60 + phase2_verdict.py, bfd938b); re-derived here when a monitor's collation showed ~0.60 instead of ~0.80.
+- **Infra.** A100-80GB train-only (batch-96 SIGReg needs the rank); frozen-encoder probing offloaded to a cheap RTX-4000-Ada mounting the SAME eur-is-1 network volume (dual-mount confirmed) — expensive card released the instant training finished. SIMBA Mgas maps (Phase 3) pulled by a 2-vCPU CPU pod over plain HTTPS from `users.flatironinstitute.org/~camels/CMD/2D_maps/data/SIMBA/` (Globus not needed; path verified by matching the known ITNG file's byte size).
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)
