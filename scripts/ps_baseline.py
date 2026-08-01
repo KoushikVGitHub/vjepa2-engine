@@ -115,9 +115,15 @@ def ridge_test(Xtr, ytr, Xva, yva, Xte, yte, alphas, Xho=None, yho=None):
     UNPENALIZED; y is 1-D so alpha is selected per target. The fit (A,b) uses train only, so
     selecting alpha on val never leaks into the coefficients.
 
-    If (Xho, yho) is given (a HELD-OUT SUITE), it is standardized by the SAME train stats and scored
-    with the SAME fitted w -> the classical cross-suite number, the foil for the SSL probe's
-    ITNG-trained-head-applied-to-SIMBA transfer. r2_ho is None when no held-out set is passed.
+    If (Xho, yho) is given (a HELD-OUT SUITE), two cross-suite numbers are returned:
+      r2_ho    = 'as-deployed': held-out features standardized by the TRAIN(in-suite) stats, scored
+                 with the fitted w. Off-distribution amplitude -> extrapolation; the honest number
+                 for pk 'as it would be used'.
+      r2_ho_sn = 'self-normalized': held-out features standardized by the HELD-OUT suite's OWN stats,
+                 then scored with w. This removes the trivial per-suite feature offset/scale (the fair
+                 analog of the SSL probe self-normalizing SIMBA INPUTS) so it isolates whether the
+                 pk->cosmology SHAPE transfers, separate from amplitude-extrapolation.
+    Both are None when no held-out set is passed.
     """
     m, s = Xtr.mean(0), Xtr.std(0) + 1e-8
     aug = lambda X: np.hstack([(X - m) / s, np.ones((len(X), 1))])
@@ -136,12 +142,17 @@ def ridge_test(Xtr, ytr, Xva, yva, Xte, yte, alphas, Xho=None, yho=None):
     resid = yte - Xte_ @ w
     ss_te = ((yte - yte.mean()) ** 2).sum()
     r2_te = 1.0 - (resid ** 2).sum() / ss_te
-    r2_ho = None
+    r2_ho = r2_ho_sn = None
     if Xho is not None:
-        # held-out suite: standardize by TRAIN(in-suite) stats, score with the same w.
-        rho = yho - aug(Xho) @ w
-        r2_ho = 1.0 - (rho ** 2).sum() / ((yho - yho.mean()) ** 2).sum()
-    return r2_te, float(np.sqrt((resid ** 2).mean())), best_al, best_val, r2_ho
+        ss_ho = ((yho - yho.mean()) ** 2).sum()
+        # (a) as-deployed: standardize by TRAIN(in-suite) stats, score with the same w.
+        r2_ho = 1.0 - ((yho - aug(Xho) @ w) ** 2).sum() / ss_ho
+        # (b) self-normalized: standardize held-out by ITS OWN mean/std (per-suite offset removed),
+        #     the fair analog of the SSL probe self-normalizing SIMBA inputs; same w.
+        mh, sh = Xho.mean(0), Xho.std(0) + 1e-8
+        aug_h = lambda X: np.hstack([(X - mh) / sh, np.ones((len(X), 1))])
+        r2_ho_sn = 1.0 - ((yho - aug_h(Xho) @ w) ** 2).sum() / ss_ho
+    return r2_te, float(np.sqrt((resid ** 2).mean())), best_al, best_val, r2_ho, r2_ho_sn
 
 
 def main():
@@ -191,33 +202,35 @@ def main():
 
     hdr = f"{'feature':<12}{'dim':>5}   {'R2(Om)':>8}{'R2(s8)':>8}"
     if heldout:
-        hdr += f"   {'xR2(Om)':>8}{'xR2(s8)':>8}   {'dropOm':>7}{'drops8':>7}"
-    hdr += f"   {'RMSE(Om)':>10}{'RMSE(s8)':>10}   (in-suite TEST" + (" | cross=SIMBA all)" if heldout else ")")
+        hdr += (f"   {'xR2(Om)':>9}{'xR2(s8)':>9}   {'xR2sn(Om)':>10}{'xR2sn(s8)':>10}")
+    hdr += "   (in-suite TEST" + (" | x=train-norm | xsn=self-norm, SIMBA all)" if heldout else ")")
     print(hdr)
     print("-" * len(hdr))
     for fname, (X, Xh) in feats.items():
-        r2s, xr2s, rmses = [], [], []
+        r2s, xr2s, xr2sns = [], [], []
         for t in range(2):
             Xho = Xh if heldout else None
             yho = Yh[:, t] if heldout else None
-            r2, rmse, _, _, r2_ho = ridge_test(X[tr_idx], Y[tr_idx, t], X[va_idx], Y[va_idx, t],
-                                               X[te_idx], Y[te_idx, t], alphas, Xho, yho)
-            r2s.append(r2); rmses.append(rmse)
+            r2, _, _, _, r2_ho, r2_ho_sn = ridge_test(
+                X[tr_idx], Y[tr_idx, t], X[va_idx], Y[va_idx, t],
+                X[te_idx], Y[te_idx, t], alphas, Xho, yho)
+            r2s.append(r2)
             if heldout:
-                xr2s.append(r2_ho)
+                xr2s.append(r2_ho); xr2sns.append(r2_ho_sn)
         row = f"{fname:<12}{X.shape[1]:>5}   {r2s[0]:>8.3f}{r2s[1]:>8.3f}"
         if heldout:
-            row += (f"   {xr2s[0]:>8.3f}{xr2s[1]:>8.3f}   "
-                    f"{r2s[0]-xr2s[0]:>7.3f}{r2s[1]-xr2s[1]:>7.3f}")
-        row += "   " + "".join(f"{r:>10.4f}" for r in rmses)
+            row += (f"   {xr2s[0]:>9.3f}{xr2s[1]:>9.3f}   "
+                    f"{xr2sns[0]:>10.3f}{xr2sns[1]:>10.3f}")
         print(row)
 
     print("-" * len(hdr))
     print("* in-suite TEST R^2 = comparable to run_probe.py's IN-SUITE R^2 (same sim_split seed 0).")
     if heldout:
-        print("* xR2 = cross-suite R^2 (fit on in-suite train, applied to ALL held-out maps) = the")
-        print("  classical foil for the SSL probe's HELD-OUT (SIMBA) R^2. The headline compares the")
-        print("  SSL cross-suite DROP against pk's 'drop' column: SSL retains more -> transfer win.")
+        print("* xR2    = cross-suite, held-out standardized by TRAIN(in-suite) stats ('as-deployed').")
+        print("* xR2sn  = cross-suite, held-out SELF-normalized by its own stats (removes per-suite")
+        print("           offset) = fair analog of the SSL probe self-normalizing SIMBA inputs.")
+        print("  Read: xR2 << xR2sn -> the collapse was amplitude-EXTRAPOLATION; xR2sn still low ->")
+        print("        genuine SHAPE-transfer failure. Compare xR2sn to the SSL probe's held-out R^2.")
 
 
 if __name__ == "__main__":
