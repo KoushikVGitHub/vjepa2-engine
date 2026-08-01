@@ -222,15 +222,17 @@ def main():
     # Cross-suite robustness (challenge #2) -- only if the held-out suite is on disk.
     held_npy = os.path.join(args.data_root, f"Maps_{args.field}_{args.heldout}_LH_z=0.00.npy")
     if os.path.exists(held_npy):
+        # Held-out is EVAL-ONLY (head already trained) -> STREAM it through the live encoder instead
+        # of caching its tokens. At patch-8/img-256 the held-out token cache is ~31GB of host RAM;
+        # ON TOP of the in-suite cache that exceeds a typical container memory cgroup (~62GB) and the
+        # run is OOM-killed (rc137) right after the in-suite metrics. Streaming = one frozen forward
+        # pass (same GPU cost as precompute, deterministic -> identical numbers) but O(batch) RAM, so
+        # peak stays ~= the in-suite cache alone. enc is the live encoder (probe_stage already set).
         hds = make_dataset(args.data_root, args.field, args.heldout)
         h_idx = list(range(len(hds)))
-        if args.no_cache:
-            hte = loader(hds, h_idx, 128, False, args.workers)
-        else:
-            hte = cached_loader(cached_tokens(enc, hds, h_idx, device, args.precompute_batch, args.workers,
-                                              _featpath(args.heldout, "heldout")), 256, False)
+        hte = loader(hds, h_idx, 128, False, args.workers)
         print(f"\n=== HELD-OUT ({args.heldout}) = cross-suite robustness ===")
-        _print_metrics(eval_probe(enc_head, head, hte, device))
+        _print_metrics(eval_probe(enc, head, hte, device))
     else:
         print(f"\n[probe] held-out suite {args.heldout} not on disk -- skipping cross-suite eval.")
 
