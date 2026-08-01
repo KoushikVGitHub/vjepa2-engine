@@ -164,6 +164,10 @@ def main():
     # the same checkpoint is deterministic -- otherwise probe R^2 varies ~+-0.03 run-to-run, which
     # swamps a convergence curve. Fixed seed => the R^2-vs-steps trend is signal, not head-init noise.
     torch.manual_seed(args.seed)
+    # Cap ATen intra-op threads: torch defaults its pool to #cores, which oversubscribes a
+    # small CPU cgroup and starves the DataLoader workers that feed the GPU (GPU idles at 0%%).
+    # OMP_NUM_THREADS does NOT cap torch's pool; set_num_threads does. Light CPU work here.
+    torch.set_num_threads(4)
 
     # Build the encoder config from the CLI so a patch-8 / downscaled checkpoint loads cleanly.
     # NB: use a distinct name (not ENC) -- assigning ENC here would shadow the module-level ENC
