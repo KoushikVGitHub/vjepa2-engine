@@ -1,0 +1,27 @@
+=== Phase-3 diagnosis | tag=conv_s0 stage=encoder | IllustrisTNG (15000, 2048) -> SIMBA (15000, 2048) ===
+features = mean+std pooled tokens (fixed pool), ridge readout, split 12000/1500/1500 maps (sim-level)
+
+[B  ridge readout (fit IllustrisTNG)] alpha=10000
+  in-suite IllustrisTNG TEST        | Omega_m: R2= +0.793 r=+0.893 r2aff=0.797 bias=-0.01s spread=0.83 | sigma8: R2= +0.414 r=+0.646 r2aff=0.417 bias=-0.03s spread=0.60 
+  x-suite SIMBA (src-norm)          | Omega_m: R2= +0.030 r=+0.436 r2aff=0.190 bias=-0.37s spread=0.58 | sigma8: R2= -0.297 r=+0.332 r2aff=0.110 bias=+0.62s spread=0.49 
+  x-suite SIMBA (self-norm)         | Omega_m: R2= +0.180 r=+0.442 r2aff=0.196 bias=-0.00s spread=0.57 | sigma8: R2= +0.106 r=+0.347 r2aff=0.120 bias=-0.00s spread=0.47 
+
+[A' oracle (fit SIMBA)] alpha=10000
+  in-suite SIMBA TEST               | Omega_m: R2= +0.263 r=+0.516 r2aff=0.267 bias=+0.05s spread=0.49 | sigma8: R2= +0.312 r=+0.571 r2aff=0.327 bias=-0.02s spread=0.45 
+  R  reverse -> IllustrisTNG (src-norm)| Omega_m: R2= +0.613 r=+0.791 r2aff=0.626 bias=-0.07s spread=0.70 | sigma8: R2= -0.100 r=+0.397 r2aff=0.157 bias=-0.51s spread=0.41 
+  R  reverse -> IllustrisTNG (self-norm)| Omega_m: R2= +0.612 r=+0.788 r2aff=0.621 bias=-0.02s spread=0.69 | sigma8: R2= +0.158 r=+0.399 r2aff=0.159 bias=-0.03s spread=0.41 
+
+[E  few-shot adaptation on SIMBA]  (test = SIMBA held-out sims)
+  N=   1 sims | scratch-ridge R2 Om=-0.985 s8=-0.855 | src-weights+affine-recal R2 Om=-0.985 s8=-0.855
+  N=   5 sims | scratch-ridge R2 Om=-0.489 s8=-0.168 | src-weights+affine-recal R2 Om=-0.379 s8=-0.018
+  N=  20 sims | scratch-ridge R2 Om=+0.037 s8=+0.134 | src-weights+affine-recal R2 Om=+0.066 s8=+0.109
+  N= 100 sims | scratch-ridge R2 Om=+0.153 s8=+0.240 | src-weights+affine-recal R2 Om=+0.098 s8=+0.143
+  N= 800 sims | scratch-ridge R2 Om=+0.263 s8=+0.312 | src-weights+affine-recal R2 Om=+0.099 s8=+0.151
+
+[D  representation shift IllustrisTNG vs SIMBA]
+  per-dim mean shift |dmu|/sigma_src : median=0.13 p90=0.30 max=0.61 | frac dims >1sigma = 0.00
+  per-dim scale ratio sigma_tgt/sigma_src: median=1.02 p10=0.93 p90=1.17
+  suite-identity linear probe accuracy      : 0.720  (0.5 = suites indistinguishable)
+  top-50 PCA subspace overlap              : 0.585  (1 = identical subspace)
+  cos(w_IllustrisTNG, w_SIMBA) for Omega_m : +0.472  (1 = same readout direction, 0 = unrelated)
+  cos(w_IllustrisTNG, w_SIMBA) for sigma8  : -0.021  (1 = same readout direction, 0 = unrelated)

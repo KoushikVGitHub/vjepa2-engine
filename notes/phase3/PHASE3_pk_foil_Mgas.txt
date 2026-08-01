@@ -1,0 +1,32 @@
+[Mgas/in-suite] 15000 maps @ 256x256, transform=log10
+  [Mgas/in-suite] featurized 0/15000
+  [Mgas/in-suite] featurized 2000/15000
+  [Mgas/in-suite] featurized 4000/15000
+  [Mgas/in-suite] featurized 6000/15000
+  [Mgas/in-suite] featurized 8000/15000
+  [Mgas/in-suite] featurized 10000/15000
+  [Mgas/in-suite] featurized 12000/15000
+  [Mgas/in-suite] featurized 14000/15000
+[Mgas/held-out] 15000 maps @ 256x256, transform=log10
+  [Mgas/held-out] featurized 0/15000
+  [Mgas/held-out] featurized 2000/15000
+  [Mgas/held-out] featurized 4000/15000
+  [Mgas/held-out] featurized 6000/15000
+  [Mgas/held-out] featurized 8000/15000
+  [Mgas/held-out] featurized 10000/15000
+  [Mgas/held-out] featurized 12000/15000
+  [Mgas/held-out] featurized 14000/15000
+[Mgas] sim_split(seed=0): 12000 train / 1500 val / 1500 test maps; reporting in-suite TEST R^2 + cross-suite on ALL 15000 held-out maps
+
+feature       dim     R2(Om)  R2(s8)     xR2(Om)  xR2(s8)    xR2sn(Om) xR2sn(s8)   (in-suite TEST | x=train-norm | xsn=self-norm, SIMBA all)
+--------------------------------------------------------------------------------------------------------------------------------------------
+pk             32      0.834   0.446      -3.269   -0.665       -0.515    -0.003
+moments         4      0.448   0.245      -0.223    0.059       -0.122     0.102
+pk+moments     36      0.837   0.544      -3.911   -0.536       -0.637     0.138
+--------------------------------------------------------------------------------------------------------------------------------------------
+* in-suite TEST R^2 = comparable to run_probe.py's IN-SUITE R^2 (same sim_split seed 0).
+* xR2    = cross-suite, held-out standardized by TRAIN(in-suite) stats ('as-deployed').
+* xR2sn  = cross-suite, held-out SELF-normalized by its own stats (removes per-suite
+           offset) = fair analog of the SSL probe self-normalizing SIMBA inputs.
+  Read: xR2 << xR2sn -> the collapse was amplitude-EXTRAPOLATION; xR2sn still low ->
+        genuine SHAPE-transfer failure. Compare xR2sn to the SSL probe's held-out R^2.

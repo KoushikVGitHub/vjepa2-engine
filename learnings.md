@@ -353,6 +353,86 @@ Sequence (each phase runs at the Phase-0 global batch so rank is never a hidden 
 - **Method note (already fixed upstream).** Probe logs print RMSE / R2 / Coverage — a `tail -1` collation grabs Coverage, not R2; anchor to `R2 :`. This was already fixed on origin/main (9f98d60 + phase2_verdict.py, bfd938b); re-derived here when a monitor's collation showed ~0.60 instead of ~0.80.
 - **Infra.** A100-80GB train-only (batch-96 SIGReg needs the rank); frozen-encoder probing offloaded to a cheap RTX-4000-Ada mounting the SAME eur-is-1 network volume (dual-mount confirmed) — expensive card released the instant training finished. SIMBA Mgas maps (Phase 3) pulled by a 2-vCPU CPU pod over plain HTTPS from `users.flatironinstitute.org/~camels/CMD/2D_maps/data/SIMBA/` (Globus not needed; path verified by matching the known ITNG file's byte size).
 
+**L21 — Phase 3 cross-suite transfer DIAGNOSED (2026-08-01) — the catastrophic negative R² is a readout artifact, but the residual failure is real and worse than expected: the pretrained transformer decodes cosmology WORSE THAN ITS OWN UNTRAINED SELF, in-suite and cross-suite. Honest null on the Phase-3 headline.**
+
+- **Why this entry.** L20 green-lit Phase 3 with "transfer is the only headline". Phase 3 came back at Ω_m −0.31 / σ8 −0.51 on SIMBA (seed 1: −2.46 / −7.96), and the pk foil looked equally dead, so the question was *why*: readout artifact (H1/H3/H5) or genuine representation failure (H2/H4)? This entry runs the discriminating controls. Answer: **both, in that order — and the dominant term is H4, localised precisely.**
+
+- **Method.** One frozen pass per (representation, suite) dumps mean+std pooled tokens (`scripts/phase3_feats.py`); every readout control then runs on CPU in seconds (`scripts/phase3_diag.py`). The fixed pool + ridge is the fair analog of pk's fixed feature vector — and it is not a straw man: it reproduces the deployed attentive-pool MLP head in-suite (conv ridge 0.793 vs head 0.809 in L20; linear ridge 0.666 vs head 0.651), so ridge-vs-head differences cross-suite are about *regularisation*, not about pooling capacity. Cross-suite is scored on all 15000 target maps, split is sim-level (`sim_split`, seed 0) as always. "self-norm" = target features standardised by the target suite's own (unlabelled) statistics — the same treatment `ps_baseline.py` gives pk in its `xR2sn` column, so the comparison is like-for-like.
+
+- **MASTER TABLE — Mgas, IllustrisTNG → SIMBA, ridge readout on pooled frozen features.** `r²aff` = R² achievable after an oracle affine recalibration on the target (= r², the ceiling of any rescaling fix). "SIMBA oracle" = the same readout refitted ON SIMBA labels = what the representation could give with a perfect target-side readout.
+
+  | representation | eff-rank (corr) | in-suite ITNG Ω_m/σ8 | x-suite SIMBA (self-norm) | x-suite r²aff | SIMBA oracle |
+  |---|---|---|---|---|---|
+  | pk (32-dim classical foil) | — | 0.833 / 0.446 | −0.480 / −0.003 | 0.052 / 0.228 | 0.729 / 0.265 |
+  | conv_s0 **trained encoder** | 283 | 0.793 / 0.414 | **+0.180 / +0.106** | 0.196 / 0.120 | **0.263 / 0.312** |
+  | linear_s0 trained encoder (F) | 132 | 0.666 / 0.399 | +0.012 / +0.092 | 0.139 / 0.107 | 0.206 / 0.273 |
+  | **random-init** encoder (H7) | 6.2 | **0.881 / 0.607** | **+0.303 / +0.115** | 0.319 / 0.273 | **0.715 / 0.364** |
+  | conv_s0 **raw tokenizer** (H3) | 4.6 | **0.922 / 0.705** | **+0.392 / +0.113** | **0.444 / 0.235** | **0.824 / 0.439** |
+  | **random** tokenizer (draw 1) | 4.0 | 0.921 / 0.702 | +0.133 / −0.354 | 0.270 / 0.105 | 0.814 / 0.429 |
+  | **random** tokenizer (draw 2) | — | 0.914 / 0.693 | +0.472 / −0.095 | 0.490 / 0.234 | 0.805 / 0.409 |
+
+  Deployed attentive-head reference (3 head-seeds each), the same comparison run with the *deployed* readout rather than ridge:
+
+  | stage | in-suite ITNG | x-suite SIMBA (per seed) |
+  |---|---|---|
+  | encoder (depth 24) | 0.812 ± 0.005 / 0.399 ± 0.015 | −0.305/−0.514, **−2.464/−7.956**, −0.399/−0.388 |
+  | tokenizer (depth 0) | 0.912 ± 0.005 / 0.559 ± 0.015 | −0.018/−1.272, −0.165/−0.249, −0.115/−0.700 |
+
+- **H3 CONFIRMED — the head explains the SIGN and the instability, not the ceiling.** Same encoder, same features: deployed head −0.31 / −0.51 → regularised ridge on self-normalised features **+0.180 / +0.106**. The seed-1 blow-up (−7.96) is head extrapolation variance, not encoder physics — note the *oracle* arm (in-distribution features) is stable across the same 3 seeds (0.269 ± 0.011). The effect is not specific to the encoder stage: run at the tokenizer (the brief's experiment C, deployed head, 3 seeds) the same head gives x-suite **−0.018 / −0.165 / −0.115** where ridge on the identical features gives **+0.392**. **Any future cross-suite number must be reported with a ridge control; an unregularised MLP head on OOD features produces meaningless magnitudes.**
+
+- **H5 partially — amplitude extrapolation is a minor term for the SSL encoder, a huge one for pk.** Self-normalising target features buys the encoder +0.15 Ω_m (+0.030 → +0.180) but buys pk +2.6 (−3.08 → −0.480). Consistently, feature-space shift is *small*: per-dim mean shift median 0.13σ, **zero** dims beyond 1σ, scale ratio ≈ 1.0, suite-identity linear probe only 0.72. **SIMBA features are not far out of distribution — so "extrapolation" is not the story.**
+
+- **H1 partially — the encoder does contain SIMBA cosmology, but only ~⅓ of what it has in-suite.** SIMBA oracle = 0.263 (ridge) / 0.269 (deployed head), two independent readouts agreeing, vs 0.79–0.81 in-suite. Few-shot (E) confirms this is a ceiling, not a data-starvation artifact: 20 SIMBA sims → +0.04, 100 → +0.15, 800 → +0.26 = the oracle. Affine-only recalibration of the ITNG readout saturates at +0.10.
+
+- **H2 real but NOT "SIMBA is just harder" — the control kills that excuse.** New control: pk fitted **on SIMBA** scores in-suite SIMBA **0.729 / 0.265**. So SIMBA costs a classical statistic only 0.83 → 0.73 on Ω_m, while it costs the encoder 0.79 → 0.26. **The degradation is the encoder's, not the suite's.**
+
+- **H4 CONFIRMED AND LOCALISED — this is the dominant term. The transformer is where the cosmology dies.**
+  - Its own **raw conv tokenizer** (pre-transformer, same checkpoint) beats the full encoder everywhere: in-suite **0.922 vs 0.793**, cross-suite **+0.392 vs +0.180**, transferable information r²aff **0.444 vs 0.196**, and SIMBA oracle **0.824 vs 0.263**.
+  - That last number is the decisive one: **SIMBA maps demonstrably contain 0.82-worth of decodable Ω_m at the tokenizer, and the 24-layer pretrained transformer reduces it to 0.26.** The information is not missing from the data or lost in the domain gap — it is destroyed downstream.
+  - **The random-init control (H7) closes it:** an untrained ViT-L at the same config scores **0.881 in-suite** and **0.715 SIMBA-oracle** — i.e. *random* token mixing costs 0.92 → 0.88 / 0.82 → 0.72, while *trained* mixing costs 0.92 → 0.79 / 0.82 → 0.26. **Masked-JEPA pretraining did not merely fail to add transferable structure; it removed cosmological signal that random weights preserve, and removed the cross-suite-shared part hardest.**
+  - **The tokenizer's decoding power is ARCHITECTURAL, not learned.** A *random* conv stem matches the trained one in-suite (0.921 / 0.914 across two draws vs trained 0.922) and on the SIMBA oracle (0.814 / 0.805 vs 0.824). Whatever makes the stem good — an overlapping conv filter bank read out by mean+std over patches — is there at initialisation. **Pretraining adds ~nothing to the stem in-suite.**
+  - **⚠ OPEN, do not claim either way: whether the pretext improved the stem's TRANSFER.** The first random draw suggested a clear win for the trained stem (x-suite r²aff 0.270 vs 0.444), but a second random draw landed at **0.490 — above** the trained stem. `--random-init` is unseeded, so those are two different random encoders, and the spread across draws (0.270 → 0.490) is larger than the trained-vs-random gap. **n=2 is not a control.** Needs ≥5 seeded draws before any statement about pretraining improving suite-invariance at the stem. The in-suite claim above is unaffected (draws agree to ±0.007 there).
+  - Experiment F rules out the "conv stem overfits ITNG texture" reading: the linear-stem encoder is worse than conv both in-suite (0.666) *and* cross-suite (+0.012), and both sit far below their own tokenizers. Conv is not the problem; the transformer is.
+
+- **DEPTH SWEEP — rules out the standard "only the top blocks are pretext-specialised" alternative, and hands us the fix.** One pass walks `blocks.layers` and probes after each depth (`scripts/phase3_depth.py`; the walk is verified bit-identical to `encoder.forward()`, rel-err 0.0e+00, and depth 0 reproduces the tokenizer run exactly — two independent code paths agreeing).
+
+  Run against an UNTRAINED encoder of the same architecture (right-hand columns), which is what turns the curve into an attribution:
+
+  | depth | trained: in-suite | trained: **SIMBA oracle** | random: in-suite | random: **SIMBA oracle** |
+  |---|---|---|---|---|
+  | 0 (tokenizer) | 0.922 / 0.705 | 0.824 / 0.439 | 0.914 / 0.693 | 0.805 / 0.409 |
+  | **2** | **0.939 / 0.715** | **0.830 / 0.462** | 0.925 / 0.696 | 0.807 / 0.409 |
+  | 4 | 0.934 / 0.684 | 0.815 / 0.452 | 0.922 / 0.697 | 0.806 / 0.411 |
+  | 8 | 0.913 / 0.634 | 0.743 / 0.406 | 0.920 / 0.685 | 0.806 / 0.413 |
+  | 12 | 0.882 / 0.534 | 0.640 / 0.348 | — | — |
+  | 16 | 0.838 / 0.476 | 0.529 / 0.314 | — | — |
+  | 20 | 0.822 / 0.431 | 0.402 / 0.312 | — | — |
+  | 24 | 0.793 / 0.414 | **0.263 / 0.312** | 0.882 / 0.588 | **0.722 / 0.383** |
+
+  - **THE CLEANEST RESULT IN THIS ENTRY: 24 blocks of *random* mixing cost the SIMBA oracle 0.805 → 0.722 (−10%); 24 blocks of *trained* mixing cost 0.824 → 0.263 (−68%).** Depth is not the destroyer — **training is.** The two curves are indistinguishable through block ~4 and diverge from block ~8 (trained 0.743 vs random 0.806) onward.
+  - The decay is gradual and monotone, not a last-block artifact ⇒ "just read out mid-stack" is not a rescue for this checkpoint; every block past ~4 costs.
+  - **Out-of-suite information decays ~4× faster than in-suite accuracy** (in-suite −16% vs oracle −68% over the same 24 blocks). **The pretext degrades transferability specifically** — precisely the property Phase 3 set out to demonstrate.
+  - **Practical finding: depth 2–4 is the good representation.** Depth-2 in-suite Ω_m **0.939 beats the fair pk floor 0.834** — the in-suite win L18/L20 called unreachable *is* reachable, just not at depth 24. **Do not bank it as a JEPA win:** a random encoder scores 0.925 at the same depth, so the win is architectural (overlapping conv filter bank + mean/std pooling beats a 2-point statistic). The trained-minus-random margin at depth 2 (+0.014 in-suite, +0.023 oracle) is one random draw wide — **not established.**
+
+- **MECHANISM — isotropy is not alignment (the SIGReg reading).** Effective rank (correlation spectrum, so it is scale-free) of the pooled features: raw tokenizer **4.6**, random-init encoder **6.2**, **trained encoder 283**. The anti-collapse objective did exactly what it is designed to do — it spread the embedding over ~280 effective directions instead of ~5 — and decoding got *worse*. The cosmology signal lives in a handful of dominant directions (patch-wise log-density level and spread); SIGReg's isotropy pressure dilutes those into a bath of directions that carry mostly suite-specific feedback texture. **This reframes the L18 cov-decorrelation win (rank 2 → 38, Ω_m 0.23 → 0.50): more rank helped *within* the collapsed-encoder family, but the whole family sits below its own input tokenizer. Rank was never the objective — label-aligned variance was.**
+
+- **The intended headline, honestly scored — SSL beats pk cross-suite on Ω_m ONLY, and the credit belongs to the tokenizer, not the JEPA.** Adding Pearson r to the pk foil (`scripts/phase3_pk_corr.py`) separates information from calibration:
+  - Ω_m: encoder r²aff **0.196** vs pk **0.052** — a genuine ~4× information advantage, not a calibration accident. Tokenizer 0.444.
+  - σ8: encoder r²aff **0.120** vs pk **0.228** — **pk carries roughly twice the transferable σ8 information**; the encoder's nominally-better R² (+0.106 vs −0.003) is a calibration accident.
+  - **Correction to a Phase-3 premise:** "even the fair pk foil has ZERO cross-suite skill" is wrong. pk keeps r = 0.477 on σ8 cross-suite (r²aff 0.228); its R² ≈ 0 is a *calibration* failure. Never conclude "no skill" from R² alone on an OOD set — report r alongside.
+  - Asymmetry, seen in both pk and SSL: SIMBA→ITNG transfers, ITNG→SIMBA does not (encoder ridge reverse Ω_m **+0.613** self-norm vs forward +0.180; pk reverse +0.286 vs forward −0.480). A readout fit on SIMBA even scores higher on ITNG (0.613) than on SIMBA itself (0.263). **ITNG is the easy, narrow suite; training there does not cover SIMBA's feedback regime. If a single-suite pretraining corpus is kept, it should be SIMBA, not IllustrisTNG.**
+  - Direction geometry says the same: cos(w_ITNG, w_SIMBA) = +0.47 (Ω_m) and **−0.02 (σ8)** for the trained encoder, vs +0.63 / +0.27 at the tokenizer. **What the trained encoder calls "σ8" is a suite-specific direction.**
+
+- **VERDICT (answering the brief's (a)-vs-(b) directly).** It is **(b), a genuine encoder-representation failure**, with an (a) readout artifact layered on top that accounted for the alarming magnitude but none of the ceiling. Precisely: a fair readout turns −0.31/−0.51 into +0.18/+0.11, and a target-supervised readout tops out at +0.26/+0.31 — while the *same checkpoint's own tokenizer* reaches +0.39 zero-shot and 0.82 target-supervised. **No measurement in this battery shows the pretext adding anything that its own random initialisation does not already provide** — and past block ~4 it subtracts, hard and specifically from the transferable part. As a whole encoder it is a net-negative feature extractor: worse than its own untrained self, in-suite and out. **Do not ship "the JEPA learned transferable physics" — the deliverable that survives is a negative result with clean controls, plus a concrete localisation of the fault (blocks ~8–24 of a 24-block stack trained with this objective).**
+
+- **What the pretraining would need (ranked by evidence, not by appeal).**
+  1. **Multi-suite pretraining** (ITNG + SIMBA + Astrid mixed, or SIMBA-only given the asymmetry). Nothing in a single-suite masked objective makes feedback a nuisance variable; the σ8 direction being orthogonal across suites is exactly what that predicts.
+  2. **An objective with label-agnostic *alignment*, not just isotropy** — the rank-283-decodes-worse result says variance-spreading is actively harmful here. Candidates: keep an explicit reconstruction/predictive term on the dominant low-frequency component, or an invariance term across feedback-parameter-perturbed pairs (CAMELS ships the feedback params — domain randomisation over A_SN/A_AGN is available for free).
+  3. **Far fewer layers, or a stem-level artifact.** The measured value sits entirely at the tokenizer; 24 layers of pretrained mixing is where it is lost. A 2–4 layer encoder (or LeWorldModel-scale, ~15M params — which is what AMI actually runs) is both the cheaper and the better-evidenced configuration to try next.
+  4. **Gate any future pretraining run on beating its own tokenizer and its own random init**, in-suite AND on the SIMBA oracle. That 2-number gate would have caught this before Phase 3. It is cheap: one frozen pass + a ridge.
+
+- **Infra / method notes.** RTX-4090 24GB Secure-Cloud pod on the eur-is-1 volume, maps staged to `/dev/shm/cdata`; a full 15k-map ViT-L featurisation is ~2.5 min there, so the whole 6-representation × 2-suite battery cost ~30 min of GPU. Two ViT-L passes do NOT fit concurrently on 24GB (one OOM'd at batch 96 while the oracle held 11.4GB) — serialise on a flag. Dumping pooled features once and running every readout control on CPU is what made this diagnosis cheap; keep `phase3_feats.py` + `phase3_diag.py` as the standard transfer-audit path.
+
 ---
 
 ## Track 3 — the plan (settled via design review, 2026-07-24)

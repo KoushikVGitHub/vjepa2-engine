@@ -1,0 +1,8 @@
+representation               suite           rank_cov  rank_corr    dim
+----------------------------------------------------------------------
+conv_s0_encoder              IllustrisTNG        71.4      283.0   2048
+conv_s0_encoder              SIMBA               61.8      237.9   2048
+conv_s0_tokenizer            IllustrisTNG         2.3        4.6   2048
+conv_s0_tokenizer            SIMBA                2.4        4.5   2048
+randinit_encoder             IllustrisTNG         1.6        6.2   2048
+randinit_encoder             SIMBA                1.6        6.5   2048

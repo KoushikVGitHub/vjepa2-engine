@@ -1,0 +1,28 @@
+[in-suite] 15000 maps @ 256x256, transform=log10
+  [in-suite] featurized 0/15000
+  [in-suite] featurized 2000/15000
+  [in-suite] featurized 4000/15000
+  [in-suite] featurized 6000/15000
+  [in-suite] featurized 8000/15000
+  [in-suite] featurized 10000/15000
+  [in-suite] featurized 12000/15000
+  [in-suite] featurized 14000/15000
+[held-out] 15000 maps @ 256x256, transform=log10
+  [held-out] featurized 0/15000
+  [held-out] featurized 2000/15000
+  [held-out] featurized 4000/15000
+  [held-out] featurized 6000/15000
+  [held-out] featurized 8000/15000
+  [held-out] featurized 10000/15000
+  [held-out] featurized 12000/15000
+  [held-out] featurized 14000/15000
+
+[pk] alpha=100  dim=32
+  in-suite TEST                     | Omega_m: R2= +0.833 r=+0.914 r2aff=0.835 bias=+0.01s spread=0.87 | sigma8: R2= +0.446 r=+0.675 r2aff=0.456 bias=-0.04s spread=0.58 
+  x-suite (src-norm)                | Omega_m: R2= -3.080 r=+0.132 r2aff=0.017 bias=-1.64s spread=0.76 | sigma8: R2= -0.665 r=+0.494 r2aff=0.244 bias=+0.83s spread=0.97 
+  x-suite (self-norm)               | Omega_m: R2= -0.480 r=+0.229 r2aff=0.052 bias=-0.00s spread=0.96 | sigma8: R2= -0.003 r=+0.477 r2aff=0.228 bias=-0.00s spread=0.96 
+
+[pk+moments] alpha=0.1  dim=36
+  in-suite TEST                     | Omega_m: R2= +0.838 r=+0.916 r2aff=0.840 bias=+0.02s spread=0.88 | sigma8: R2= +0.544 r=+0.738 r2aff=0.545 bias=-0.02s spread=0.71 
+  x-suite (src-norm)                | Omega_m: R2= -3.995 r=+0.012 r2aff=0.000 bias=-1.83s spread=0.81 | sigma8: R2= -0.536 r=+0.524 r2aff=0.275 bias=+0.76s spread=1.01 
+  x-suite (self-norm)               | Omega_m: R2= -0.653 r=+0.153 r2aff=0.023 bias=-0.00s spread=0.98 | sigma8: R2= +0.136 r=+0.559 r2aff=0.312 bias=-0.00s spread=0.98 
