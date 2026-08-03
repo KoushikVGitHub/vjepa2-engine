@@ -1,0 +1,44 @@
+name: eval-framework
+
+# Tool-grounded eval CI: the cheap CPU tier that the framework's design makes
+# "continuous". No torch, no CAMELS data, no GPU -- these checks run in minutes on
+# every push/PR and fail the build if a finding breaks or a claim loses its backing.
+
+on:
+  push:
+    branches: [main, eval-framework]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  eval:
+    name: gate tests + estimator calibration + ledger dogfood
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install (numpy / scipy / scikit-learn -- no torch, no data)
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy scikit-learn
+
+      - name: Gate unit tests (known-answer; incl. the L21 seed-swing trap)
+        run: python eval/test_eval.py
+
+      - name: DOF estimator calibration (synthetic known-dim manifolds, data-free)
+        # No --maps -> dof_tests runs only the calibration battery, which needs no volume.
+        run: python scripts/dof_tests.py
+
+      - name: Ledger dogfood -- chain verify + judge reproduces (retract-against-interest)
+        # Rebuilds the DOF ledger deterministically in a temp dir and asserts the
+        # expected verdicts (pk-anchor + data-id + suite-sep-cv CERTIFIED, original
+        # suite-sep ABANDONED). Exercises trace + claims + hash chain + judge end-to-end.
+        run: python eval/dogfood_dof.py
