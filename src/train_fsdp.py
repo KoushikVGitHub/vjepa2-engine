@@ -29,6 +29,7 @@ if "PYTORCH_KERNEL_CACHE_PATH" not in os.environ:
 import math
 import time
 import shutil
+import numpy as np
 import argparse
 import functools
 
@@ -389,6 +390,41 @@ def infinite(loader, sampler):
         epoch += 1
 
 
+class SuiteTagged(torch.utils.data.Dataset):
+    """Wraps a per-field dataset so each item carries its SUITE id, for the de-classification
+    adversary. The SSL path ignores the tag; the adversary consumes it. Only used when --suites
+    is set -- single-suite runs keep the image-only tensor batch (legacy) untouched."""
+
+    def __init__(self, base, suite_id):
+        self.base = base
+        self.suite_id = int(suite_id)
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, i):
+        return self.base[i], self.suite_id
+
+
+class FeedbackTagged(torch.utils.data.Dataset):
+    """Wraps a per-field dataset so each item carries its 4 STANDARDIZED feedback params
+    (A_SN1, A_AGN1, A_SN2, A_AGN2), for the feedback-invariance adversary. All 15 maps of a
+    sim share the sim's params (idx // maps_per_sim = sim)."""
+
+    def __init__(self, base, feedback, maps_per_sim=15):
+        self.base = base
+        self.fb = feedback                      # torch.float32 (n_sims, 4)
+        self.mps = maps_per_sim
+        assert len(base) % maps_per_sim == 0 and len(base) // maps_per_sim == len(feedback), \
+            f"feedback rows {len(feedback)} != sims {len(base)//maps_per_sim} (len {len(base)})"
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, i):
+        return self.base[i], self.fb[i // self.mps]
+
+
 def build_dataloader(args, world, rank):
     """
     Configures the real CAMELS multifield dataloader, sharded across distributed ranks.
@@ -440,27 +476,54 @@ def build_dataloader(args, world, rank):
     # dropped (IllustrisTNG-only + floor-dominated, p50 std 0.009). The 12 kept fields exist in
     # BOTH suites -> reusable for the SIMBA held-out probe.
     FIELDS = args.fields
-    field_configs = [
-        {"npy_path": os.path.join(args.data_root, f"Maps_{f}_IllustrisTNG_LH_z=0.00.npy"),
-         "name": f, "transform": "log10", "min_std": 0.05}
-        for f in FIELDS
-    ]
+    SUITES = args.suites or ["IllustrisTNG"]        # None = legacy single-suite (image-only batches)
+    multi = args.suites is not None
+    assert not (multi and getattr(args, "holdout_test_sims", False)), \
+        "--holdout-test-sims (in-suite probe-test exclusion) is not supported with multi-suite " \
+        "--suites; cross-suite transfer holds out a DIFFERENT suite, so no in-suite holdout is needed."
+    field_configs = []
+    for si, suite in enumerate(SUITES):
+        for f in FIELDS:
+            field_configs.append(
+                {"npy_path": os.path.join(args.data_root, f"Maps_{f}_{suite}_LH_z=0.00.npy"),
+                 "name": f, "transform": "log10", "min_std": 0.05, "suite": suite, "suite_id": si})
 
-    # Keep only fields whose file is actually on the volume, so a partial download still runs
-    # (and newly-transferred fields auto-join on the next launch).
-    missing = [c["name"] for c in field_configs if not os.path.exists(c["npy_path"])]
+    # Keep only (suite,field) files actually on the volume, so a partial download still runs.
+    missing = [(c["suite"], c["name"]) for c in field_configs if not os.path.exists(c["npy_path"])]
     field_configs = [c for c in field_configs if os.path.exists(c["npy_path"])]
     if missing:
-        rprint(f"[data] skipping fields with no file under {args.data_root}: {missing}")
+        rprint(f"[data] skipping (suite,field) with no file under {args.data_root}: {missing}")
     if not field_configs:
         raise FileNotFoundError(f"no CAMELS field files found under {args.data_root}")
-    rprint(f"[data] pooling fields: {[c['name'] for c in field_configs]}")
+    if multi:
+        rprint(f"[data] pooling suites {SUITES} x fields {sorted({c['name'] for c in field_configs})} "
+               f"| suite_ids={ {c['suite']: c['suite_id'] for c in field_configs} }")
+    else:
+        rprint(f"[data] pooling fields: {[c['name'] for c in field_configs]}")
 
-    # 2. Pool all specified field files into ONE large corpus
-    ds = ConcatDataset([
-        FieldMapDataset(size=args.img, augment=not args.no_augment, **config)
-        for config in field_configs
-    ])
+    # Feedback-invariance: load the 4 A_SN/A_AGN params (cols 2:6 of params_LH), standardized, for
+    # the single training suite. All fields share them (same sims). (--invariance-mode feedback.)
+    fb_tensor = None
+    if args.invariance_mode == "feedback":
+        assert len(set(c["suite"] for c in field_configs)) == 1, \
+            "feedback invariance trains on a SINGLE suite; pass one --suites or the default."
+        fb_suite = field_configs[0]["suite"]
+        raw = np.loadtxt(os.path.join(args.data_root, f"params_LH_{fb_suite}.txt"))
+        fb = raw[:, 2:6].astype("float32")               # A_SN1, A_AGN1, A_SN2, A_AGN2
+        fb = (fb - fb.mean(0)) / (fb.std(0) + 1e-8)
+        fb_tensor = torch.from_numpy(fb)
+        rprint(f"[data] feedback-invariance on {fb_suite}: {fb.shape[0]} sims x 4 params (standardized)")
+
+    # 2. Pool all (suite,field) files into ONE corpus. suite mode -> tag suite_id; feedback mode ->
+    # tag the 4 feedback params; legacy single-suite -> image-only tensor.
+    def _mk(cfg):
+        base = FieldMapDataset(size=args.img, augment=not args.no_augment,
+                               npy_path=cfg["npy_path"], name=cfg["name"],
+                               transform=cfg["transform"], min_std=cfg["min_std"])
+        if args.invariance_mode == "feedback":
+            return FeedbackTagged(base, fb_tensor)
+        return SuiteTagged(base, cfg["suite_id"]) if multi else base
+    ds = ConcatDataset([_mk(c) for c in field_configs])
 
     # H9 control (--holdout-test-sims): exclude the PROBE's test sims from pretraining so the
     # frozen encoder never sees the probe test set even UNLABELED. A sim id = one cosmology shared
@@ -523,7 +586,31 @@ def main():
     model = build_model(args, device)
     n_online = online_param_count(model)
     model = wrap_fsdp(model, args, device) if args.mode == "fsdp" else wrap_ddp(model, args)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # De-classification adversary (optional). Built AFTER the model so its params join the same
+    # optimizer. Tiny -> left unsharded; its own params get normal grads while the encoder sees the
+    # REVERSED gradient through the GRL, pushing the latent toward suite-invariance (Miest-style).
+    adversary = declassify_loss = feedback_loss = dann_lambda = suite_accuracy = feedback_r2 = None
+    if args.declassify_lambda > 0:
+        from declassify import (SuiteAdversary, FeedbackAdversary, declassify_loss,
+                                feedback_loss, dann_lambda, suite_accuracy, feedback_r2)
+        if args.invariance_mode == "feedback":
+            adversary = FeedbackAdversary(d=args.d, n_params=4).to(device)
+            rprint(f"[invariance] FEEDBACK adversary on: 4 params, max-lambda "
+                   f"{args.declassify_lambda}, gamma {args.declassify_gamma}")
+        else:
+            n_suites = len(args.suites) if args.suites else 0
+            if n_suites < 2:
+                raise ValueError("suite invariance requires --suites with >=2 suites "
+                                 f"(got {args.suites!r}); or use --invariance-mode feedback.")
+            adversary = SuiteAdversary(d=args.d, n_suites=n_suites).to(device)
+            rprint(f"[invariance] SUITE adversary on: {n_suites} suites, max-lambda "
+                   f"{args.declassify_lambda}, gamma {args.declassify_gamma}")
+        adversary.train()
+
+    opt = torch.optim.AdamW(
+        list(model.parameters()) + (list(adversary.parameters()) if adversary is not None else []),
+        lr=args.lr)
 
     # LR schedule: linear warmup -> cosine decay to lr*lr_min_ratio. A flat LR with no warmup
     # lets early updates slam the shared encoder into collapse before the representation forms;
@@ -575,8 +662,15 @@ def main():
         # (Single-GPU here => NO_SHARD => no cross-rank grad reduction, so no model.no_sync() needed.)
         opt.zero_grad(set_to_none=True)
         loss_val = 0.0
+        dcl_val, suite_acc_val, lam_val = 0.0, None, 0.0
         for micro in range(args.grad_accum):
-            batch = next(data).to(device, non_blocking=True)          # (B, 1, H, W)
+            raw = next(data)
+            if isinstance(raw, (list, tuple)):                        # (image, tag): suite_id | feedback
+                batch = raw[0].to(device, non_blocking=True)
+                tag = raw[1].to(device, non_blocking=True)
+            else:                                                     # legacy image-only tensor
+                batch = raw.to(device, non_blocking=True)             # (B, 1, H, W)
+                tag = None
 
             # Ensure per-microbatch SYNCED seed so every rank draws the SAME projections V and
             # frequencies t -- else the all-reduced sums are incomparable. (SIGReg/lejepa only.)
@@ -587,6 +681,22 @@ def main():
                 loss = model(batch,
                              sigreg_generator=sigreg_gen if sigreg_sync else None,
                              sigreg_distributed=sigreg_sync)
+                # De-classification term: adversary on the pooled full-image latent (stashed by the
+                # loss forward). The GRL carries the sign -- adding this MINIMIZES suite-decodability
+                # in the encoder while the adversary's own params learn to classify.
+                if adversary is not None and tag is not None:
+                    jm = (model.module if hasattr(model, "module") else model).jepa
+                    lam_val = dann_lambda(step, args.steps, gamma=args.declassify_gamma,
+                                          max_lambda=args.declassify_lambda)
+                    pooled = jm.last_full_pooled.float()
+                    if args.invariance_mode == "feedback":
+                        dcl, preds = feedback_loss(pooled, tag.float(), adversary, lam_val)
+                        suite_acc_val = feedback_r2(preds, tag.float())   # -> 0 = de-confounded
+                    else:
+                        dcl, logits = declassify_loss(pooled, tag, adversary, lam_val)
+                        suite_acc_val = suite_accuracy(logits, tag)       # -> chance = de-classified
+                    loss = loss + dcl
+                    dcl_val += dcl.item() / args.grad_accum
             (loss / args.grad_accum).backward()
             loss_val += loss.item() / args.grad_accum
         if args.grad_clip > 0:                            # tame the grad spikes that tip it into collapse
@@ -605,6 +715,11 @@ def main():
                 extra = (f" | pred {j.last_pred:.4f} reg {j.last_reg:.4f} "
                          f"var {j.last_var:.4f} cov {j.last_cov:.4f} "
                          f"tgt_std {j.last_tgt_std:.4f} eff_rank {j.last_eff_rank:.1f}")
+            if adversary is not None and suite_acc_val is not None:
+                # mechanistic gate: suite mode -> suite_acc must fall to chance; feedback mode ->
+                # fb_r2 must fall to ~0. dcl = adversary loss; lam = current reversal strength.
+                mlbl = "fb_r2" if args.invariance_mode == "feedback" else "suite_acc"
+                extra += f" | dcl {dcl_val:.3f} {mlbl} {suite_acc_val:.3f} lam {lam_val:.2f}"
             rprint(f"step {step:>4} loss {loss_val:.4f}{extra} | lr {sched.get_last_lr()[0]:.2e}")
 
         # Periodic checkpoints: insurance against a long run dying, AND the raw material for an
@@ -703,6 +818,19 @@ def parse_args():
                    default=["Mgas", "Mcdm", "Mtot", "Mstar", "T", "P", "Z", "HI", "ne", "MgFe", "Vgas", "Vcdm"],
                    help="comma-separated CAMELS fields to pool; default = all 12 both-suite fields. "
                         "Trim for fast iteration, e.g. --fields Mgas (missing files auto-skipped).")
+    p.add_argument("--suites", type=lambda s: [x for x in s.split(",") if x], default=None,
+                   help="comma suites to POOL into the pretraining corpus, e.g. IllustrisTNG,SIMBA. "
+                        "None = single-suite IllustrisTNG (legacy). Held-out TEST suite is NOT here. "
+                        "When set, the loader yields (image, suite_id) for the de-classification adversary.")
+    p.add_argument("--invariance-mode", choices=["suite", "feedback"], default="suite",
+                   help="what the adversary sheds: 'suite' (categorical, needs --suites>=2) or "
+                        "'feedback' (regress the 4 A_SN/A_AGN params, single-suite; the CAMELS-fit "
+                        "variant since ITNG~Astrid are inseparable).")
+    p.add_argument("--declassify-lambda", type=float, default=0.0,
+                   help="max DANN gradient-reversal strength; 0 = off. Try 1.0. suite mode needs "
+                        "--suites>=2; feedback mode trains on a single suite. (Miest-style invariance.)")
+    p.add_argument("--declassify-gamma", type=float, default=10.0,
+                   help="ramp sharpness for the dann_lambda schedule (0 -> declassify-lambda over the run).")
     p.add_argument("--holdout-test-sims", action="store_true",
                    help="H9 control: exclude the probe's 100 test sims (sim_split seed=0) from "
                         "pretraining across ALL pooled fields, so the frozen encoder never sees the "

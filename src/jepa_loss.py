@@ -445,6 +445,10 @@ class JEPA(nn.Module):
 
         # (2) Full-image encoding, WITH grad -> feeds both the targets (3) and SIGReg (6).
         full = self.context_encoder(x)                        # (B, n, d)
+        # De-classification hook: pooled full-image features (grad INTACT so the adversary's
+        # reversed gradient reaches the encoder). Consumed by the training loop only if an
+        # adversary is built (--declassify-lambda>0); harmless otherwise.
+        self.last_full_pooled = full.mean(dim=1)              # (B, d)
 
         # (3) Target latents = target positions of the full encoding. NO stop-grad; grad flows
         #     into tgt (unlike ema mode). SIGReg is what stops the collapse this would cause.
@@ -496,6 +500,7 @@ class JEPA(nn.Module):
         #       encoding WITH grad feeding both the targets and the regularizer.
         ctx = self.context_encoder(x, keep=context_idx)
         full = self.context_encoder(x)                        # (B, n, d)
+        self.last_full_pooled = full.mean(dim=1)              # (B, d) de-classification hook (grad intact)
         tgt = full[:, target_idx]                             # NO stop-grad; VISReg stops collapse
 
         # (3) Predict target latents from context (the "Invariance" term of VIS).

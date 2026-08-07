@@ -8,3 +8,6 @@ checkpoints/
 samples/
 analysis/*.png
 .ipynb_checkpoints/
+*.sha256
+eval/_dogfood/
+eval/_test/
