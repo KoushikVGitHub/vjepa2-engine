@@ -335,7 +335,7 @@ value proposition is the honesty of its numbers, and a reader who spots one drif
 | Trained checkpoints are "seed 0" | `learnings.md` L16, L18 | Training ran at `--seed 1234` (A4). `phase2c_audit.sh:12` documents the discovery. |
 | "41 tests" | `README.md:83` | Measured: **42 collected**, 41 passed + 1 skipped on Windows. |
 | Distributed SIGReg "world=2 ≡ world=1 … in loss *and* gradient" | `README.md:19,62` | Gradient matches up to ×`world`; see P9. The test file states this correctly, the README does not. |
-| `study/` "depends on `src/`, never the reverse" | `README.md:111` | Holds — verified by grep; no `src/` module imports from `study/`. ✔ |
+| `study/` (now the `vjepa-study` repo) depends on `src/`, never the reverse | `README.md` | Holds — verified by grep before the split; no `src/` module imports the study code. ✔ |
 | Curation listed as `fields.py` + `curation.py` | `README.md:18` | `curation.py` is the unused video path (A14). The CAMELS curation is entirely `fields.py`. |
 | Stage-4 inference levers | `README.md:21` | Measured at patch-16/256 tokens; production is now patch-8/1024 tokens (P13). |
 

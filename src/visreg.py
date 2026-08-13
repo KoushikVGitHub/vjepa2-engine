@@ -4,7 +4,7 @@ Goal of this file: Implement the *successor* to SIGReg/LeJEPA from the same lab.
 LeJEPA's promise -- a single, principled, negative-free, teacher-free anti-collapse objective --
 but fixes the specific failure this repo hit head-on: SIGReg's characteristic-function test goes
 gradient-BLIND near anisotropic (dimensional) collapse. We measured it directly (see
-study/notes/collapse_resolution.md): at a rank-2 state SIGReg's gradient norm was ~2e-4, so we had
+the vjepa-study repo (notes/collapse_resolution.md)): at a rank-2 state SIGReg's gradient norm was ~2e-4, so we had
 to bolt on a VICReg variance/covariance patch (sigreg.py:variance_covariance_reg) to supply the
 missing force. VISReg makes that patch unnecessary by construction.
 
@@ -90,6 +90,6 @@ def visreg_loss(z: torch.Tensor, n_proj: int = 256, eps: float = 1e-6) -> torch.
 if __name__ == "__main__":
     # This module stays a pure library (mirrors sigreg.py). The pedagogical demo -- VISReg keeps a
     # STRONG gradient under dimensional collapse where SIGReg's nearly vanishes -- lives in
-    # study/visreg_demo.py.  Run:  python study/visreg_demo.py
+    # the vjepa-study repo (visreg_demo.py).  Run:  the visreg_demo.py demo in the vjepa-study repo
     print("Nothing to run here. For the VISReg vs SIGReg collapse-gradient demo: "
-          "python study/visreg_demo.py")
+          "the visreg_demo.py demo in the vjepa-study repo")

@@ -4,7 +4,7 @@ The reference VISReg does NOT do masked prediction. It makes several augmented c
 (global + local views), encodes them all, and makes their embeddings AGREE (invariance), regularized
 by VISReg. That augmentation invariance is a harder-to-shortcut objective than masked interpolation,
 which is likely why VISReg holds rank there but collapsed in our masked-prediction setup (see
-study/notes). This dataset produces the crops; the model's forward_multicrop consumes them.
+the vjepa-study repo). This dataset produces the crops; the model's forward_multicrop consumes them.
 
 V1 simplifications (documented, flagged for later):
   - ALL crops at the SAME resolution (varying scale/content via RandomResizedCrop), because our

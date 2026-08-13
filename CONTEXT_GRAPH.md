@@ -16,7 +16,7 @@ what is in flight, and where the record contradicts itself — without re-readin
   operating model are migrated into §1 here; that file remains the exhaustive detail.
 - `README.md` = the public artifact (currently a phase behind — see §6).
 
-**Sources, in order of authority:** `git log` → `learnings.md` → `README.md` → `study/notes/*.md` →
+**Sources, in order of authority:** `git log` → `learnings.md` → `README.md` → the `vjepa-study` repo →
 `scripts/phase*.sh` headers (which carry the pre-registered read rules for H1/H3/H4/H5/H7/H9/H11/
 S1/S2/S3).
 
@@ -64,11 +64,11 @@ scripts/                 orchestration + eval (NOT trained code)
   test_*.py              CPU correctness guards for the controls (⚠ live in scripts/, NOT collected
                          by CI — A11).
 tests/                   the CI gates (42 tests, CPU-only, depth ≤2 to dodge a CPU-attention segfault).
-study/                   personal research notes (collapse_resolution.md, day4_results.md).
+vjepa-study/             personal research notes, now a separate repo (collapse_resolution.md, day4_results.md).
 .github/workflows/ci.yml push/PR gate; re-runs the distributed-SIGReg invariant as its own step.
 ```
-**Dependency rule (verified):** `study/` depends on `src/`, never the reverse. No `src/` module
-imports from `study/` or `scripts/`.
+**Dependency rule (verified):** the study code (now the `vjepa-study` repo) depends on `src/`, never
+the reverse. No `src/` module imports from `scripts/` or the study code.
 
 ### 1.3 Data + training flow (engine stages)
 1. **Curate** (`fields.py`): load `Maps_<field>_IllustrisTNG_LH_z=0.00.npy` (1000 sims × 15 maps),

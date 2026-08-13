@@ -565,4 +565,4 @@ class JEPA(nn.Module):
 
 
 # The synthetic collapse study (make_batch + train + the config comparison) lives in
-# study/collapse_study.py -- it imports the classes above. This module stays a pure library.
+# the vjepa-study repo (collapse_study.py) -- it imports the classes above. This module stays a pure library.

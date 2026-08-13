@@ -2,7 +2,7 @@
 
 Measures forward-only inference on `jepa_loss.ViTEncoder` (keeper config
 img256/patch16/d1024/heads16/L24, 256 tokens) lever-by-lever, single GPU, and prints a
-markdown results table you paste into study/notes/day5_inference.md.
+markdown results table you paste into the vjepa-study repo (notes/day5_inference.md.)
 
 Levers (see the P1-P5 predictions in the notes BEFORE you run this):
   baseline     eager, fp32                         -- the reference

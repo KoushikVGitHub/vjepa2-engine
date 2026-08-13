@@ -304,7 +304,7 @@ def collapsed(core, args, device) -> bool:
     """True once the representation has demonstrably collapsed -- decided IDENTICALLY on all ranks.
 
     Grad-clipping + cosine decay make late training monotone: once it tips into the collapse
-    basin it does NOT come back (measured -- see study/notes/collapse_resolution.md), so an
+    basin it does NOT come back (measured -- see the vjepa-study repo (notes/collapse_resolution.md)), so an
     unattended long run that collapses at step 3k would burn the remaining hours for nothing.
 
     tgt_std and eff_rank are LOCAL per-rank statistics and can straddle the threshold differently

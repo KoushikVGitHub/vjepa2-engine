@@ -36,7 +36,7 @@ The shape of the work matters for tool choice:
 | **`write-a-skill`** | Authors new skills with progressive disclosure | See §3 — this repo has three recurring, mechanical, error-prone rituals that are perfect skill material | Once a workflow has been done by hand ≥3 times (phase-report scraping is at 5+) |
 | **`dataviz` skill** | Chart/plot design system before you write chart code | The R²-vs-steps convergence ladder (`ab_converge.sh` probes at 2000/4000), the mask-ratio curve (`learnings.md:227-232`), the stem A/B bar with the pk floor as a reference rule, the eff_rank-vs-global-batch scatter that L12/L13/L15/L18 disagree about. All of these are currently ASCII tables | Any time a result would read better as a figure — especially the eff_rank-vs-batch plot, which is where four learnings contradict each other |
 | **`Artifact` + `artifact-design`** | Publish a private, self-contained hosted page; same URL on redeploy | Already in the workflow (`learnings.md:446`). The right artifact is a **phase dashboard**: the decision ledger + numbers-of-record from `CONTEXT_GRAPH.md`, the R² tables, and the H*/S* status board, redeployed at each phase close | End of a phase, or when handing state to a collaborator |
-| **`WebSearch` / `WebFetch`** | Read the actual source instead of recalling | The rule is already written down (`learnings.md:439-442`): confirmed VISReg's `num_projections=4096` and that Galaxy10 is downstream-only. Live needs: the CMD `o3_err` supervised baseline numbers, the published CAMELS VAE linear-probe R² 0.93 caveat (`study/notes/collapse_resolution.md:124-129`), CAMELS SIMBA suite download specifics for Phase 3 | Any claim about external literature or a dataset you are about to cite in README |
+| **`WebSearch` / `WebFetch`** | Read the actual source instead of recalling | The rule is already written down (`learnings.md:439-442`): confirmed VISReg's `num_projections=4096` and that Galaxy10 is downstream-only. Live needs: the CMD `o3_err` supervised baseline numbers, the published CAMELS VAE linear-probe R² 0.93 caveat (`the vjepa-study repo (notes/collapse_resolution.md):124-129`), CAMELS SIMBA suite download specifics for Phase 3 | Any claim about external literature or a dataset you are about to cite in README |
 | **`init` (CLAUDE.md)** | Generate a repo CLAUDE.md | **This repo has no CLAUDE.md.** The non-obvious invariants (loss going up = healthy; `eff_rank` not `tgt_std`; split must be sim-level; probe `--stem` must match the ckpt) are currently only discoverable by reading 37 KB of `learnings.md` | Do this once, soon; seed it from `CONTEXT_GRAPH.md` §5 |
 | **`fewer-permission-prompts`** | Scans transcripts, writes a scoped allowlist into `.claude/settings.json` | This session's traffic is dominated by `git log`, `pytest`, `grep`, and (on pod days) `ssh pod '…'` and `scp`. There is currently **no `.claude/` directory** in the repo | Once, early. It pays back every pod session |
 | **`update-config`** | Edit `settings.json`, permissions, env vars, hooks | Pin `PYTORCH_KERNEL_CACHE_PATH` guidance, allowlist the pod SSH host, and add a **Stop hook that runs `pytest -q`** so the CPU gates cannot silently rot between commits | When you want an automated behaviour (hooks), not a remembered preference |
@@ -51,11 +51,11 @@ The shape of the work matters for tool choice:
 | Skill/Tool | Why it does not apply |
 |---|---|
 | `migrate-to-shoehorn` | TypeScript-only (`as` assertions, `@total-typescript/shoehorn`). This repo has zero TS. |
-| `scaffold-exercises` | Builds course exercise directories. `study/` is a personal study log, not a course. |
+| `scaffold-exercises` | Builds course exercise directories. the `vjepa-study` repo is a personal study log, not a course. |
 | `setup-pre-commit` | Husky + lint-staged + Prettier — a Node toolchain. If pre-commit hooks are wanted here, use `update-config` with a Python/pytest hook instead. |
 | `claude-in-chrome` | No browser surface. The only remote surface is SSH to a pod. |
 | `claude-api` | The repo contains no LLM/Anthropic-SDK code — it is torch + numpy. The skill's own SKIP rule ("another provider being worked on") doesn't even fire; there is simply no LLM call site. |
-| `obsidian-vault` | Notes live in `study/notes/*.md` in-repo and are read by CI-adjacent docs links, not an Obsidian vault. |
+| `obsidian-vault` | Notes live in `the vjepa-study repo (notes/*.md)` in-repo and are read by CI-adjacent docs links, not an Obsidian vault. |
 | `keybindings-help` | Editor ergonomics, orthogonal to the work. |
 | `run` | Its job is "launch this project's app and screenshot it". This project's "app" is a 2-GPU 7-hour `torchrun` on a rented pod; none of the skill's built-in patterns (CLI/server/TUI/Electron/browser) match, and guessing wrong wastes GPU time. Use the `phase*.sh` scripts. |
 | `statusline-setup` agent | Cosmetic. |
@@ -260,7 +260,7 @@ by an existing skill. (Proposals only — not created.)
 - **Inputs:** none by default; optionally a specific metric to trace.
 - **Steps:**
   1. Extract every headline number with its file:line from `README.md`, `learnings.md`,
-     `study/notes/*.md`, `scripts/*.sh` echo lines, and commit subjects (`git log --pretty=%s`).
+     `the vjepa-study repo (notes/*.md)`, `scripts/*.sh` echo lines, and commit subjects (`git log --pretty=%s`).
   2. Cluster by metric identity — pk floor Ω_m, pk floor σ8, best conv Ω_m, best σ8, eff_rank vs
      global batch, encoder param count, test count — and report every cluster with >1 distinct value.
   3. Check derived claims still hold under the newest inputs. The live example: the σ8 headline

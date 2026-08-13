@@ -250,8 +250,8 @@ if __name__ == "__main__":
     # Production entry point = the DISTRIBUTED correctness gate only. Run:
     #   torchrun --standalone --nproc_per_node=2 src/sigreg.py --verify
     # The pedagogical sanity demo (SIGReg ~0 for N(0,I), large for collapsed) moved to
-    # study/sigreg_demo.py so this module stays a pure library.
+    # the vjepa-study repo (sigreg_demo.py) so this module stays a pure library.
     if "--verify" in sys.argv:
         verify_all_reducible()
         raise SystemExit(0)
-    print("Nothing to run without --verify. For the SIGReg sanity demo: python study/sigreg_demo.py")
+    print("Nothing to run without --verify. For the SIGReg sanity demo: the sigreg_demo.py demo in the vjepa-study repo")

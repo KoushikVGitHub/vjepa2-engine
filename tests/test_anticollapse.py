@@ -1,6 +1,6 @@
 """The anisotropic-collapse result, as an executable claim.
 
-This is the repo's central finding (study/notes/collapse_resolution.md): SIGReg's Cramer-Wold
+This is the repo's central finding (the vjepa-study repo (notes/collapse_resolution.md)): SIGReg's Cramer-Wold
 sketch tests each 1-D projection MARGINALLY, so a low-rank blob whose marginals still look
 like N(0,1) sails through it with a vanishing gradient -- while the VICReg off-diagonal
 covariance term sees it immediately. That is why `--var-coef/--cov-coef` exist, and why
